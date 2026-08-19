@@ -24,9 +24,10 @@ final class ConversationViewModel: ObservableObject {
 
     private let audio = AudioIOManager()
     private let client = RealtimeClient()
+    let memoryStore = MemoryStore()
     private var assistantLineIndex: Int?
 
-    var systemInstructions = "你是一个友好、简洁的语音助手，用自然口语中文回答问题。"
+    var systemInstructions = "你是一个友好、简洁的语音助手，用自然口语中文回答问题。如果背景信息里提供了用户过去说过的相关内容，用它来帮助回答，但不要生硬地照读，也不要提及“背景信息”这个说法本身。"
 
     func start() {
         guard case .idle = state else { return }
@@ -85,6 +86,7 @@ final class ConversationViewModel: ObservableObject {
         client.onUserTranscript = { [weak self] text in
             guard let self, !text.isEmpty else { return }
             self.transcript.append(TranscriptLine(speaker: .user, text: text))
+            self.groundAndRespond(to: text)
         }
 
         client.onSpeechStarted = { [weak self] in
@@ -112,6 +114,25 @@ final class ConversationViewModel: ObservableObject {
                 self.state = .idle
             }
         }
+    }
+
+    /// Retrieves relevant local memory for what the user just said, hands it to the
+    /// model as background context, then triggers the reply. The session is configured
+    /// with `autoRespond: false` (see `start()`), so this is the only place a response
+    /// gets requested — it must run for every user turn, not just when memory is found.
+    private func groundAndRespond(to userText: String) {
+        let relevant = memoryStore.search(query: userText, limit: 5)
+        memoryStore.add(userText)
+
+        if !relevant.isEmpty {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "M月d日 HH:mm"
+            let lines = relevant.map { "- [\(formatter.string(from: $0.timestamp))] \($0.text)" }
+            let context = "以下是用户过去说过、可能相关的内容：\n" + lines.joined(separator: "\n")
+            client.sendContext(context)
+        }
+
+        client.requestResponse()
     }
 
     private func appendToAssistantLine(_ delta: String) {

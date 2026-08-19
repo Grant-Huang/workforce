@@ -31,7 +31,10 @@ final class RealtimeClient: NSObject {
     ///   - model: Model id sent as the `model` query param (e.g. `gpt-realtime`,
     ///     `qwen-audio-3.0-realtime-plus`). Check your provider's console for the
     ///     current name — these change more often than the wire protocol does.
-    func connect(baseURL: String, apiKey: String, model: String, instructions: String, voice: String, turnDetection: String? = "server_vad") {
+    /// `autoRespond: false` (the default here) leaves the server detecting end-of-speech
+    /// and committing the input buffer, but lets the client decide *when* to actually
+    /// trigger a reply via `requestResponse()` — see `RealtimeOutgoingEvent.sessionUpdate`.
+    func connect(baseURL: String, apiKey: String, model: String, instructions: String, voice: String, turnDetection: String? = "server_vad", autoRespond: Bool = false) {
         guard var components = URLComponents(string: baseURL) else {
             onError?("invalid WebSocket URL: \(baseURL)")
             return
@@ -53,7 +56,7 @@ final class RealtimeClient: NSObject {
         task.resume()
         receiveLoop()
 
-        send(RealtimeOutgoingEvent.sessionUpdate(instructions: instructions, voice: voice, turnDetection: turnDetection))
+        send(RealtimeOutgoingEvent.sessionUpdate(instructions: instructions, voice: voice, turnDetection: turnDetection, autoRespond: autoRespond))
     }
 
     func disconnect() {
@@ -63,6 +66,18 @@ final class RealtimeClient: NSObject {
 
     func sendAudioChunk(_ data: Data) {
         send(RealtimeOutgoingEvent.inputAudioAppend(base64Audio: data.base64EncodedString()))
+    }
+
+    /// Hands the model a piece of background context (e.g. retrieved local memory)
+    /// ahead of the next `requestResponse()` call.
+    func sendContext(_ text: String) {
+        send(RealtimeOutgoingEvent.conversationItemCreate(text: text))
+    }
+
+    /// Triggers response generation — required when the session was configured with
+    /// `autoRespond: false`.
+    func requestResponse() {
+        send(RealtimeOutgoingEvent.responseCreate())
     }
 
     func cancelResponse() {

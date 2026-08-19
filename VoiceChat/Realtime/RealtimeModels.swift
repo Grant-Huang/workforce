@@ -11,7 +11,13 @@ import Foundation
 enum RealtimeOutgoingEvent {
     /// Configures the session: modalities, voice, audio formats, VAD, system instructions.
     /// `turnDetection` is one of "server_vad", "smart_turn", or nil for manual/push-to-talk.
-    static func sessionUpdate(instructions: String, voice: String, turnDetection: String? = "server_vad") -> [String: Any] {
+    ///
+    /// `autoRespond: false` asks the server to detect end-of-speech and commit the input
+    /// buffer *without* immediately generating a reply — mirrors OpenAI's `create_response`
+    /// flag. This app relies on that gap to inject retrieved local memory (see
+    /// `conversationItemCreate`/`responseCreate`) before the model answers. Verify Qwen
+    /// actually honors this; if not, fall back to `turnDetection: nil` (manual/push-to-talk).
+    static func sessionUpdate(instructions: String, voice: String, turnDetection: String? = "server_vad", autoRespond: Bool = true) -> [String: Any] {
         var session: [String: Any] = [
             "modalities": ["audio", "text"],
             "instructions": instructions,
@@ -25,6 +31,7 @@ enum RealtimeOutgoingEvent {
                 "threshold": 0.5,
                 "prefix_padding_ms": 300,
                 "silence_duration_ms": 500,
+                "create_response": autoRespond,
             ]
         } else {
             session["turn_detection"] = NSNull()
@@ -41,6 +48,28 @@ enum RealtimeOutgoingEvent {
             "type": "input_audio_buffer.append",
             "audio": base64Audio,
         ]
+    }
+
+    /// Inserts a plain-text context item into the conversation — used to hand the model
+    /// retrieved local-memory snippets before it answers. Sent with role "system" so it
+    /// reads as background info rather than something the user actually said.
+    static func conversationItemCreate(text: String, role: String = "system") -> [String: Any] {
+        [
+            "type": "conversation.item.create",
+            "item": [
+                "type": "message",
+                "role": role,
+                "content": [
+                    ["type": "input_text", "text": text],
+                ],
+            ],
+        ]
+    }
+
+    /// Explicitly asks the model to generate a response — needed once `autoRespond: false`
+    /// takes the server out of auto-triggering after each turn.
+    static func responseCreate() -> [String: Any] {
+        ["type": "response.create"]
     }
 
     /// Cancels the assistant's in-flight response — used when the user barges in.

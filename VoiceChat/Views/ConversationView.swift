@@ -3,6 +3,7 @@ import SwiftUI
 struct ConversationView: View {
     @StateObject private var viewModel = ConversationViewModel()
     @State private var showingSettings = false
+    @State private var showingMemory = false
 
     var body: some View {
         NavigationStack {
@@ -14,6 +15,13 @@ struct ConversationView: View {
             .padding()
             .navigationTitle("语音对话")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        showingMemory = true
+                    } label: {
+                        Image(systemName: "brain")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showingSettings = true
@@ -24,6 +32,9 @@ struct ConversationView: View {
             }
             .sheet(isPresented: $showingSettings) {
                 SettingsView()
+            }
+            .sheet(isPresented: $showingMemory) {
+                MemoryView(memoryStore: viewModel.memoryStore)
             }
         }
     }

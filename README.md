@@ -10,16 +10,24 @@
                                         Qwen-Audio-Realtime（或 OpenAI Realtime API）
                                                         │
         扬声器(AVAudioEngine) ← 24kHz PCM 音频流 ← 流式回复(文字+语音)
+
+                用户转写文本到达 ──► 本地记忆检索(MemoryStore) ──► 命中的话通过
+                                                                  conversation.item.create
+                                                                  把背景信息塞回会话
+                                                                  再发 response.create
 ```
 
 - `VoiceChat/Audio/AudioIOManager.swift` — 麦克风采集、格式转换、流式播放。输入输出采样率**不对称**：上行 16kHz，下行 24kHz（这是 Qwen 的要求；OpenAI 是上下行都 24kHz，切换时需要改这里）。
 - `VoiceChat/Realtime/RealtimeClient.swift` — WebSocket 连接与事件收发，地址/模型可配置。
-- `VoiceChat/Realtime/RealtimeModels.swift` — 用到的 Realtime API 事件的最小子集封装（`session.update` / `input_audio_buffer.append` / `response.audio.delta` 等，OpenAI 和 Qwen 共用同一套事件命名）。
-- `VoiceChat/ConversationViewModel.swift` — 把音频层和网络层粘合起来的状态机（聆听中/助手说话中/出错）。
-- `VoiceChat/Views/ConversationView.swift` — 对话界面（转写气泡 + 麦克风按钮）。
+- `VoiceChat/Realtime/RealtimeModels.swift` — 用到的 Realtime API 事件的最小子集封装（`session.update` / `input_audio_buffer.append` / `response.audio.delta` / `conversation.item.create` / `response.create` 等，OpenAI 和 Qwen 共用同一套事件命名）。
+- `VoiceChat/Memory/MemoryStore.swift` — **本地记忆**：每句用户说的话转写后都存一条（JSON 文件），下次提问时按关键词重合度 + 时间新鲜度检索最相关的几条，喂给模型当背景信息。这是验证"本地积累的记忆能不能被语音快速总结出来"这个概念用的最简实现，以后如果这个 App 并入自书，直接把 `MemoryStore` 换成读写自书共享记忆的实现即可，`add`/`search` 是替换的接缝。
+- `VoiceChat/ConversationViewModel.swift` — 把音频层、网络层、记忆层粘合起来的状态机（聆听中/助手说话中/出错），`groundAndRespond(to:)` 是"收到用户问题 → 查记忆 → 注入背景 → 触发回复"这条链路的入口。
+- `VoiceChat/Views/ConversationView.swift` / `MemoryView.swift` — 对话界面（转写气泡 + 麦克风按钮）+ 记忆列表页（左上角大脑图标，方便直接看到 App 记住了什么、命中了什么，用来验证效果）。
 - `VoiceChat/Settings/` — API Key（Keychain）+ 连接地址/模型/音色（UserDefaults）。
 
-代码里已经接好了"打断"逻辑（收到 `input_audio_buffer.speech_started` 就清空播放队列 + 取消当前回复），但 **v1 按轮流对话验证**——先把整条链路跑通，打断体验以后再针对性测试调优。
+**响应时机是手动控制的**：`session.update` 里把 `turn_detection.create_response` 设成了 `false`（对应 OpenAI Realtime API 的同名开关，Qwen 大概率沿用了同一字段，但需要你实测确认），服务端还是会自动判断"用户说完了"并提交音频缓冲区，但**不会**自动开始生成回复。真正触发回复的是 `ConversationViewModel.groundAndRespond`：拿到用户转写文本后，先查本地记忆、把命中的内容通过 `conversation.item.create` 塞进对话，再发 `response.create`。这样才保证模型说话前一定已经看到了检索到的背景信息，不会有"模型已经开始回答了，记忆才注入进去"的时序问题。如果实测发现 Qwen 不认 `create_response: false`（还是会自动回复），退路是把 `turnDetection` 改成 `nil`（推空值即手动模式/push-to-talk），自己控制何时提交音频。
+
+代码里也接了"打断"逻辑（收到 `input_audio_buffer.speech_started` 就清空播放队列 + 取消当前回复），但打断体验还没有针对 Qwen 实测调优。
 
 ## 关于模型/地址：请对照控制台核实
 
@@ -54,6 +62,10 @@ open VoiceChat.xcodeproj
 
 ## 已知限制 / 后续可做的事
 
+- **`create_response: false` 未实测**：整个"先查记忆再回答"的时序都依赖这个开关生效，是这一版最该优先验证的点（见上面架构里的说明）。
+- **记忆检索很朴素**：关键词重合度 + 时间新鲜度打分，没有语义理解，同义表达搜不到。够验证概念，真要好用大概率需要换成向量检索（比如用 Apple 的 `NaturalLanguage` 框架做本地 embedding，或者接一个向量库）。
+- **记忆不做筛选/摘要**：现在是"用户说的每句话都存"，闲聊、口头禅也会被记下来，列表会很快变得杂乱。可以加一层"只记录看起来像事实/想法的内容"的过滤，或定期跑摘要压缩。
+- **未来接自书**：现在 `MemoryStore` 是纯本地 JSON 文件，接口只有 `add`/`search` 两个方法。以后如果这个 App 内置进自书、跟自书共享记忆，直接换一个实现（读写自书的存储）替掉 `MemoryStore` 就行，不需要改 `ConversationViewModel` 里的调用逻辑。
 - **API Key 安全**：当前是把 Key 直接存在设备 Keychain、App 直连服务端。这对个人测试没问题，但如果要上架 App Store 或给别人用，必须换成后端下发"临时令牌"的方案，避免长期有效的正式 Key 被人从 App 里提取出来滥用。
 - **打断体验未验证**：`speech_started` → 清空播放/取消回复的逻辑已经写了，但还没有针对 Qwen 实测调优（阈值、灵敏度等）。
 - **断线重连**：目前网络断开后不会自动重连，只是把状态切回错误提示。
