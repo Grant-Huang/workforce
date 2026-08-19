@@ -1,0 +1,97 @@
+import AVFoundation
+
+/// Captures microphone audio and plays back assistant audio, both as mono
+/// 16-bit PCM at 24kHz — the format the OpenAI Realtime API expects/returns.
+///
+/// AVAudioEngine's hardware format is whatever the device gives us (usually
+/// 48kHz float32); `AVAudioConverter` bridges that to/from the wire format so
+/// neither the network layer nor the UI has to think about sample rates.
+final class AudioIOManager {
+    private let engine = AVAudioEngine()
+    private let playerNode = AVAudioPlayerNode()
+
+    private var inputConverter: AVAudioConverter?
+    private let wireFormat = AVAudioFormat(
+        commonFormat: .pcmFormatInt16,
+        sampleRate: 24000,
+        channels: 1,
+        interleaved: true
+    )!
+
+    var onCapturedChunk: ((Data) -> Void)?
+
+    func start() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+        try session.setActive(true)
+
+        let input = engine.inputNode
+        let hardwareFormat = input.outputFormat(forBus: 0)
+        inputConverter = AVAudioConverter(from: hardwareFormat, to: wireFormat)
+
+        engine.attach(playerNode)
+        engine.connect(playerNode, to: engine.mainMixerNode, format: wireFormat)
+
+        input.installTap(onBus: 0, bufferSize: 2048, format: hardwareFormat) { [weak self] buffer, _ in
+            self?.convertAndEmit(buffer)
+        }
+
+        engine.prepare()
+        try engine.start()
+        playerNode.play()
+    }
+
+    func stop() {
+        engine.inputNode.removeTap(onBus: 0)
+        playerNode.stop()
+        engine.stop()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    /// Schedules a chunk of PCM16/24kHz assistant audio for playback.
+    func play(pcm16 data: Data) {
+        let frameCount = UInt32(data.count / 2)
+        guard frameCount > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: wireFormat, frameCapacity: frameCount) else { return }
+        buffer.frameLength = frameCount
+
+        data.withUnsafeBytes { raw in
+            guard let src = raw.bindMemory(to: Int16.self).baseAddress,
+                  let dst = buffer.int16ChannelData?[0] else { return }
+            dst.update(from: src, count: Int(frameCount))
+        }
+
+        playerNode.scheduleBuffer(buffer, completionHandler: nil)
+    }
+
+    /// Drops any queued/playing assistant audio — called when the user barges in.
+    func interruptPlayback() {
+        playerNode.stop()
+        playerNode.play()
+    }
+
+    private func convertAndEmit(_ buffer: AVAudioPCMBuffer) {
+        guard let converter = inputConverter else { return }
+        let ratio = wireFormat.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16
+        guard let outBuffer = AVAudioPCMBuffer(pcmFormat: wireFormat, frameCapacity: capacity) else { return }
+
+        var error: NSError?
+        var consumed = false
+        converter.convert(to: outBuffer, error: &error) { _, outStatus in
+            if consumed {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            outStatus.pointee = .haveData
+            return buffer
+        }
+
+        guard error == nil, outBuffer.frameLength > 0,
+              let channelData = outBuffer.int16ChannelData else { return }
+        let byteCount = Int(outBuffer.frameLength) * 2
+        let data = Data(bytes: channelData[0], count: byteCount)
+        onCapturedChunk?(data)
+    }
+}

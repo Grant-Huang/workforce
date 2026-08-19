@@ -1,0 +1,27 @@
+name: VoiceChat
+options:
+  bundleIdPrefix: com.jacer
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+targets:
+  VoiceChat:
+    type: application
+    platform: iOS
+    sources:
+      - path: VoiceChat
+    info:
+      path: VoiceChat/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jacer.voicechat
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+schemes:
+  VoiceChat:
+    build:
+      targets:
+        VoiceChat: all
+    run:
+      config: Debug
