@@ -1,6 +1,7 @@
 import Foundation
 
-/// WebSocket client for the OpenAI Realtime API.
+/// WebSocket client for Realtime-API-style voice endpoints (OpenAI Realtime API,
+/// Qwen-Omni-Realtime / Qwen-Audio-Realtime — see `RealtimeModels.swift`).
 ///
 /// Owns the socket connection and translates between raw JSON events and the
 /// typed callbacks the view model consumes. Networking-only: it doesn't know
@@ -11,6 +12,7 @@ final class RealtimeClient: NSObject {
 
     var onAudioDelta: ((Data) -> Void)?
     var onTranscriptDelta: ((String) -> Void)?
+    var onTranscriptDone: ((String) -> Void)?
     var onUserTranscript: ((String) -> Void)?
     var onSpeechStarted: (() -> Void)?
     var onResponseDone: (() -> Void)?
@@ -22,21 +24,36 @@ final class RealtimeClient: NSObject {
         super.init()
     }
 
-    func connect(apiKey: String, model: String = "gpt-realtime", instructions: String, voice: String) {
-        guard var components = URLComponents(string: "wss://api.openai.com/v1/realtime") else { return }
+    /// - Parameters:
+    ///   - baseURL: The realtime endpoint, without the `model` query param, e.g.
+    ///     `wss://api.openai.com/v1/realtime` or
+    ///     `wss://<workspace-id>.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime`.
+    ///   - model: Model id sent as the `model` query param (e.g. `gpt-realtime`,
+    ///     `qwen-audio-3.0-realtime-plus`). Check your provider's console for the
+    ///     current name — these change more often than the wire protocol does.
+    func connect(baseURL: String, apiKey: String, model: String, instructions: String, voice: String, turnDetection: String? = "server_vad") {
+        guard var components = URLComponents(string: baseURL) else {
+            onError?("invalid WebSocket URL: \(baseURL)")
+            return
+        }
         components.queryItems = [URLQueryItem(name: "model", value: model)]
-        guard let url = components.url else { return }
+        guard let url = components.url else {
+            onError?("could not build WebSocket URL from: \(baseURL)")
+            return
+        }
 
         var request = URLRequest(url: url)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("realtime=v1", forHTTPHeaderField: "OpenAI-Beta")
+        if url.host?.contains("openai.com") == true {
+            request.setValue("realtime=v1", forHTTPHeaderField: "OpenAI-Beta")
+        }
 
         let task = session.webSocketTask(with: request)
         self.task = task
         task.resume()
         receiveLoop()
 
-        send(RealtimeOutgoingEvent.sessionUpdate(instructions: instructions, voice: voice))
+        send(RealtimeOutgoingEvent.sessionUpdate(instructions: instructions, voice: voice, turnDetection: turnDetection))
     }
 
     func disconnect() {
@@ -93,6 +110,8 @@ final class RealtimeClient: NSObject {
             }
         case .transcriptDelta(let text):
             onTranscriptDelta?(text)
+        case .transcriptDone(let text):
+            onTranscriptDone?(text)
         case .userTranscript(let text):
             onUserTranscript?(text)
         case .speechStarted:

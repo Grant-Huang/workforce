@@ -27,12 +27,11 @@ final class ConversationViewModel: ObservableObject {
     private var assistantLineIndex: Int?
 
     var systemInstructions = "你是一个友好、简洁的语音助手，用自然口语中文回答问题。"
-    var voice = "alloy"
 
     func start() {
         guard case .idle = state else { return }
         guard let apiKey = APIKeyStore.load(), !apiKey.isEmpty else {
-            state = .error("请先在设置里填入 OpenAI API Key")
+            state = .error("请先在设置里填入 API Key")
             return
         }
 
@@ -46,7 +45,13 @@ final class ConversationViewModel: ObservableObject {
             return
         }
 
-        client.connect(apiKey: apiKey, instructions: systemInstructions, voice: voice)
+        client.connect(
+            baseURL: RealtimeConfigStore.baseURL,
+            apiKey: apiKey,
+            model: RealtimeConfigStore.model,
+            instructions: systemInstructions,
+            voice: RealtimeConfigStore.voice
+        )
         state = .listening
     }
 
@@ -68,6 +73,13 @@ final class ConversationViewModel: ObservableObject {
 
         client.onTranscriptDelta = { [weak self] text in
             self?.appendToAssistantLine(text)
+        }
+
+        client.onTranscriptDone = { [weak self] text in
+            // Fallback for providers that only send the final transcript, no deltas.
+            guard let self, self.assistantLineIndex == nil, !text.isEmpty else { return }
+            self.transcript.append(TranscriptLine(speaker: .assistant, text: text))
+            self.assistantLineIndex = self.transcript.count - 1
         }
 
         client.onUserTranscript = { [weak self] text in
