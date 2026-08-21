@@ -15,8 +15,11 @@ enum RealtimeOutgoingEvent {
     /// `autoRespond: false` asks the server to detect end-of-speech and commit the input
     /// buffer *without* immediately generating a reply — mirrors OpenAI's `create_response`
     /// flag. This app relies on that gap to inject retrieved local memory (see
-    /// `conversationItemCreate`/`responseCreate`) before the model answers. Verify Qwen
-    /// actually honors this; if not, fall back to `turnDetection: nil` (manual/push-to-talk).
+    /// `conversationItemCreate`/`responseCreate`) before the model answers. Confirmed live
+    /// against `qwen-omni-turbo-realtime` on 2026-08-19 — its `session.created` response
+    /// echoed back `turn_detection.create_response` (and `interrupt_response`, for barge-in),
+    /// so this is real, not guessed (see `web-demo/README.md`). If a different model doesn't
+    /// support it, fall back to `turnDetection: nil` (manual/push-to-talk).
     static func sessionUpdate(instructions: String, voice: String, turnDetection: String? = "server_vad", autoRespond: Bool = true) -> [String: Any] {
         var session: [String: Any] = [
             "modalities": ["audio", "text"],

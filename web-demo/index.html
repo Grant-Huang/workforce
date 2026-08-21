@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>语音对话 Demo</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <span class="title">语音对话 Demo</span>
+      <span class="status" id="status">未连接</span>
+    </header>
+
+    <main class="chat" id="chat">
+      <div class="empty" id="empty">按下"开始对话"，然后说话试试</div>
+    </main>
+
+    <footer class="controls">
+      <button id="startBtn" class="btn btn-start">
+        <span class="dot"></span>开始对话
+      </button>
+      <button id="stopBtn" class="btn btn-stop" disabled>停止</button>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
