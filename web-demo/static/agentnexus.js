@@ -55,5 +55,22 @@ const AgentNexusBridge = (() => {
     }).catch((e) => console.warn("AgentNexus push failed (will just stay local for now):", e));
   }
 
-  return { config, pullMemory, pushMessage };
+  /**
+   * Writes a curated memory entry (not raw dialogue) into one of the structured
+   * layers — used when the user explicitly asks to remember something, per
+   * docs/agentnexus-memory-integration-proposal.md's "raw dialogue vs curated
+   * memory" split. Awaited (unlike pushMessage) so the caller can confirm success
+   * before telling the user it's saved.
+   */
+  async function createMemoryEntry(layer, content) {
+    const res = await fetch(`${config.baseURL}/api/v1/channels/${config.channelId}/memory/`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ layer, content }),
+    });
+    if (!res.ok) throw new Error(`create memory entry failed: ${res.status}`);
+    return res.json();
+  }
+
+  return { config, pullMemory, pushMessage, createMemoryEntry };
 })();

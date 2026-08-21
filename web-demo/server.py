@@ -60,7 +60,7 @@ async def relay(request):
         async for msg in ws_client:
             if msg.type == WSMsgType.TEXT:
                 await upstream.send(msg.data)
-            elif msg.type == WSMsgType.ERROR:
+            elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
                 break
 
     async def upstream_to_browser():

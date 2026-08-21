@@ -46,6 +46,20 @@ final class MemoryStore {
         queue.sync { entries.sorted { $0.timestamp > $1.timestamp } }
     }
 
+    /// Merges entries pulled from AgentNexus, skipping any whose text already exists
+    /// locally — cheap enough at personal-memory scale, and avoids re-adding the same
+    /// AgentNexus content on every app launch without needing a separate persisted
+    /// "already merged" id set.
+    func merge(remoteEntries: [(text: String, timestamp: Date)]) {
+        queue.sync {
+            let existingTexts = Set(entries.map(\.text))
+            for entry in remoteEntries where !existingTexts.contains(entry.text) {
+                entries.append(MemoryEntry(timestamp: entry.timestamp, text: entry.text))
+            }
+            persist()
+        }
+    }
+
     /// Naive keyword-overlap + recency ranking. Good enough to validate "can retrieved
     /// local memory ground a spoken answer" without pulling in an embedding model.
     func search(query: String, limit: Int = 5) -> [MemoryEntry] {

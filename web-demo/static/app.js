@@ -164,13 +164,31 @@ const BASE_INSTRUCTIONS = "你是一个友好、简洁的语音助手，用自�
 // only content actually in `session.update.session.instructions` gets used. Firing a
 // second session.update before the first is acked also produced an empty reply in
 // testing, so this waits for `session.updated` before doing anything else.
+//
+// That wait isn't fully reliable either, though: in further testing the ack for a
+// per-turn patch occasionally never arrived at all (server-side flakiness, not a
+// reproducible ordering bug) — so this has a timeout fallback. Missing the ack means
+// the model might answer on slightly stale instructions for that one turn rather than
+// the conversation hanging forever, which is the better failure mode.
 let pendingInstructionsAck = null;
 
-function updateInstructionsAndWait(instructions) {
+function sendSessionUpdateAndWait(sessionPatch, timeoutMs = 4000) {
   return new Promise((resolve) => {
-    pendingInstructionsAck = resolve;
-    sendEvent({ type: "session.update", session: { instructions } });
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (pendingInstructionsAck === finish) pendingInstructionsAck = null;
+      resolve();
+    };
+    pendingInstructionsAck = finish;
+    sendEvent({ type: "session.update", session: sessionPatch });
+    setTimeout(finish, timeoutMs);
   });
+}
+
+function updateInstructionsAndWait(instructions, timeoutMs = 4000) {
+  return sendSessionUpdateAndWait({ instructions }, timeoutMs);
 }
 
 /**
@@ -178,11 +196,31 @@ function updateInstructionsAndWait(instructions) {
  * Mirrors ConversationViewModel.groundAndRespond: search local memory, patch the
  * session's instructions with what's relevant, then explicitly trigger a reply (the
  * session runs with create_response:false, so nothing replies on its own).
+ *
+ * An explicit "记住…" turn takes a different path: it writes a curated entry into
+ * AgentNexus's structured memory layers (not just the raw message log every turn
+ * gets) and skips memory retrieval — it's a command, not a question, so the model
+ * just needs to briefly confirm rather than search-and-answer.
  */
 async function handleUserTurn(text) {
+  const saveIntent = SaveIntent.detect(text);
+  AgentNexusBridge.pushMessage(text, "user");
+
+  if (saveIntent) {
+    LocalMemory.add(saveIntent.content, { source: "agentnexus", layer: "PROGRESS" });
+    try {
+      await AgentNexusBridge.createMemoryEntry("PROGRESS", saveIntent.content);
+    } catch (e) {
+      console.warn("save-intent write to AgentNexus failed (stayed local only):", e);
+    }
+    const instructions = `${BASE_INSTRUCTIONS}\n\n用户刚才明确要求记住这件事："${saveIntent.content}"，你已经帮TA记下了。只需要简短确认一句就行，不要复述内容、不要追问。`;
+    await updateInstructionsAndWait(instructions);
+    sendEvent({ type: "response.create" });
+    return;
+  }
+
   const relevant = LocalMemory.search(text, 5);
   LocalMemory.add(text);
-  AgentNexusBridge.pushMessage(text, "user");
 
   if (relevant.length > 0) {
     const lines = relevant.map((e) => `- ${e.text}`);
@@ -282,33 +320,10 @@ async function start() {
       silentGain.connect(captureCtx.destination);
     }
 
-    await new Promise((resolve) => {
+    await new Promise((resolveOpen, rejectOpen) => {
       ws = new WebSocket(`ws://${location.host}/ws`);
-
-      ws.onopen = () => {
-        // Resolve once the initial session.update is actually acked (session.updated),
-        // not just sent — sending a second session.update (the per-turn memory patch)
-        // before this one lands raced and produced an empty reply in testing.
-        pendingInstructionsAck = resolve;
-        sendEvent({
-          type: "session.update",
-          session: {
-            modalities: ["audio", "text"],
-            instructions: BASE_INSTRUCTIONS,
-            voice,
-            input_audio_format: "pcm16",
-            output_audio_format: "pcm16",
-            turn_detection: {
-              type: "server_vad",
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 500,
-              create_response: false,
-            },
-          },
-        });
-      };
-
+      ws.onopen = resolveOpen;
+      ws.onerror = () => { statusEl.textContent = "WebSocket 出错"; rejectOpen(new Error("ws error")); };
       ws.onmessage = (event) => {
         try {
           handleServerEvent(JSON.parse(event.data));
@@ -316,10 +331,30 @@ async function start() {
           console.error("bad server message", event.data);
         }
       };
-
-      ws.onerror = () => { statusEl.textContent = "WebSocket 出错"; resolve(); };
       ws.onclose = () => { if (state !== STATE.IDLE) stop(); };
-    });
+    }).catch(() => {});
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      // Wait for the initial session.update to be acked (session.updated), not just
+      // sent — sending a second session.update (the per-turn memory patch) before
+      // this one lands raced and produced an empty reply in testing. Has its own
+      // timeout fallback (see sendSessionUpdateAndWait), so a missing ack here can't
+      // hang start() forever either.
+      await sendSessionUpdateAndWait({
+        modalities: ["audio", "text"],
+        instructions: BASE_INSTRUCTIONS,
+        voice,
+        input_audio_format: "pcm16",
+        output_audio_format: "pcm16",
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.5,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 500,
+          create_response: false,
+        },
+      });
+    }
   })();
 
   try {

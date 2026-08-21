@@ -25,6 +25,7 @@ final class ConversationViewModel: ObservableObject {
     private let audio = AudioIOManager()
     private let client = RealtimeClient()
     let memoryStore = MemoryStore()
+    private let agentNexusClient = AgentNexusClient()
     private var assistantLineIndex: Int?
 
     var systemInstructions = "你是一个友好、简洁的语音助手，用自然口语中文回答问题。如果背景信息里提供了用户过去说过的相关内容，用它来帮助回答，但不要生硬地照读，也不要提及“背景信息”这个说法本身。"
@@ -54,6 +55,21 @@ final class ConversationViewModel: ObservableObject {
             voice: RealtimeConfigStore.voice
         )
         state = .listening
+
+        // Pull-sync from AgentNexus in the background — short REST call, not on the
+        // conversation's critical path. If it fails or is slow, the conversation just
+        // proceeds with whatever's already in the local cache from last time.
+        Task { [weak self] in
+            guard let self, AgentNexusConfigStore.isConfigured else { return }
+            guard let entries = try? await self.agentNexusClient.fetchMemoryEntries() else { return }
+            let formatter = ISO8601DateFormatter()
+            let mapped = entries.map { entry -> (text: String, timestamp: Date) in
+                let text = entry.title.map { "\($0)：\(entry.content)" } ?? entry.content
+                let date = entry.updatedAt.flatMap { formatter.date(from: $0) } ?? Date()
+                return (text, date)
+            }
+            self.memoryStore.merge(remoteEntries: mapped)
+        }
     }
 
     func stop() {
@@ -126,7 +142,27 @@ final class ConversationViewModel: ObservableObject {
     /// Grounding via `conversation.item.create(role: "system")` was the original design
     /// but doesn't work — Qwen silently ignores it. Only `session.update`'s `instructions`
     /// field is actually honored; see `RealtimeOutgoingEvent.sessionInstructionsPatch`.
+    ///
+    /// An explicit "记住…" turn takes a different path: it writes a curated entry into
+    /// AgentNexus's structured memory layers (not just the raw message log every turn
+    /// gets) and skips memory retrieval — it's a command, not a question, so the model
+    /// just needs to briefly confirm rather than search-and-answer.
     private func groundAndRespond(to userText: String) {
+        agentNexusClient.pushMessage(userText)
+
+        if let saveIntent = SaveIntent.detect(userText) {
+            memoryStore.add(saveIntent.content)
+            Task { [weak self] in
+                try? await self?.agentNexusClient.createMemoryEntry(layer: "PROGRESS", content: saveIntent.content)
+            }
+            let instructions = systemInstructions
+                + "\n\n用户刚才明确要求记住这件事：\"\(saveIntent.content)\"，你已经帮TA记下了。只需要简短确认一句就行，不要复述内容、不要追问。"
+            client.updateInstructions(instructions) { [weak self] in
+                self?.client.requestResponse()
+            }
+            return
+        }
+
         let relevant = memoryStore.search(query: userText, limit: 5)
         memoryStore.add(userText)
 

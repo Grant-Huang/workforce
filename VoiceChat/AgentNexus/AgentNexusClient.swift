@@ -85,4 +85,50 @@ final class AgentNexusClient {
             throw AgentNexusClientError.decodingFailed
         }
     }
+
+    /// Writes a curated memory entry (not raw dialogue) into one of the structured
+    /// layers — used when the user explicitly asks to remember something, per
+    /// docs/agentnexus-memory-integration-proposal.md's "raw dialogue vs curated
+    /// memory" split. Throws on failure so the caller can decide whether/how to tell
+    /// the user, unlike `pushMessage` which is fire-and-forget.
+    func createMemoryEntry(layer: String, content: String) async throws {
+        guard AgentNexusConfigStore.isConfigured, let token = AgentNexusTokenStore.load() else {
+            throw AgentNexusClientError.notConfigured
+        }
+        let base = AgentNexusConfigStore.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let channelID = AgentNexusConfigStore.channelID
+        guard let url = URL(string: "\(base)/api/v1/channels/\(channelID)/memory/") else {
+            throw AgentNexusClientError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["layer": layer, "content": content])
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw AgentNexusClientError.httpError(status: status, body: body)
+        }
+    }
+
+    /// Fire-and-forget push of a raw conversation turn as a channel message — the
+    /// counterpart to `createMemoryEntry` for content that doesn't need curation.
+    /// Silently drops if not configured; doesn't block the caller either way.
+    func pushMessage(_ text: String, senderType: String = "user") {
+        guard AgentNexusConfigStore.isConfigured, let token = AgentNexusTokenStore.load() else { return }
+        let base = AgentNexusConfigStore.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let channelID = AgentNexusConfigStore.channelID
+        guard let url = URL(string: "\(base)/api/v1/channels/\(channelID)/messages") else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["content": text, "sender_type": senderType])
+        session.dataTask(with: request).resume()
+    }
 }
