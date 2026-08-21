@@ -4,6 +4,8 @@
 
 `web-demo/` 是同一套 Realtime API 协议的网页版验证 demo（浏览器 UI + 本地 Python 中转服务），因为 iOS App 没法在这个开发环境里编译运行，这个 demo 是用来实际连通、实测协议细节的；细节和实测记录见 `web-demo/README.md`。
 
+怎么在自己机器上把 iOS App / 网页 demo 跑起来测试，见 [`docs/testing-deployment.md`](docs/testing-deployment.md)。
+
 ## 架构
 
 ```
