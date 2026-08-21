@@ -53,19 +53,20 @@ enum RealtimeOutgoingEvent {
         ]
     }
 
-    /// Inserts a plain-text context item into the conversation — used to hand the model
-    /// retrieved local-memory snippets before it answers. Sent with role "system" so it
-    /// reads as background info rather than something the user actually said.
-    static func conversationItemCreate(text: String, role: String = "system") -> [String: Any] {
+    /// Patches the session's system instructions — the mechanism this app uses to hand
+    /// the model retrieved local-memory context before it answers.
+    ///
+    /// Tested directly against `qwen-omni-turbo-realtime` on 2026-08-19: a
+    /// `conversation.item.create` with role "system" (or a fake "assistant" turn) is
+    /// silently ignored by the model — only content actually inside
+    /// `session.update.session.instructions` gets used. Firing a second session.update
+    /// before the first is acked also produced an empty reply in testing, so callers
+    /// must wait for the `session.updated` event before calling `responseCreate()` (see
+    /// `RealtimeClient.updateInstructions`). Full test transcript in web-demo/README.md.
+    static func sessionInstructionsPatch(instructions: String) -> [String: Any] {
         [
-            "type": "conversation.item.create",
-            "item": [
-                "type": "message",
-                "role": role,
-                "content": [
-                    ["type": "input_text", "text": text],
-                ],
-            ],
+            "type": "session.update",
+            "session": ["instructions": instructions],
         ]
     }
 
@@ -90,6 +91,9 @@ enum RealtimeIncomingEvent {
     case transcriptDone(text: String)
     case userTranscript(text: String)
     case speechStarted
+    /// Ack for `session.update` — including the instructions-only patch used for
+    /// memory grounding. Callers must wait for this before requesting a response.
+    case sessionUpdated
     case responseDone
     case error(message: String)
     case unhandled(type: String)
@@ -110,6 +114,8 @@ enum RealtimeIncomingEvent {
             self = .userTranscript(text: json["transcript"] as? String ?? "")
         case "input_audio_buffer.speech_started":
             self = .speechStarted
+        case "session.updated":
+            self = .sessionUpdated
         case "response.done":
             self = .responseDone
         case "error":

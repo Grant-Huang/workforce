@@ -116,23 +116,31 @@ final class ConversationViewModel: ObservableObject {
         }
     }
 
-    /// Retrieves relevant local memory for what the user just said, hands it to the
-    /// model as background context, then triggers the reply. The session is configured
-    /// with `autoRespond: false` (see `start()`), so this is the only place a response
-    /// gets requested — it must run for every user turn, not just when memory is found.
+    /// Retrieves relevant local memory for what the user just said, patches it into the
+    /// session's instructions, then triggers the reply once that patch is acked. The
+    /// session is configured with `autoRespond: false` (see `start()`), so this is the
+    /// only place a response gets requested — it must run for every user turn, not just
+    /// when memory is found (and must always patch instructions, even back to the base
+    /// prompt with nothing found, so a previous turn's injected memory doesn't linger).
+    ///
+    /// Grounding via `conversation.item.create(role: "system")` was the original design
+    /// but doesn't work — Qwen silently ignores it. Only `session.update`'s `instructions`
+    /// field is actually honored; see `RealtimeOutgoingEvent.sessionInstructionsPatch`.
     private func groundAndRespond(to userText: String) {
         let relevant = memoryStore.search(query: userText, limit: 5)
         memoryStore.add(userText)
 
+        var instructions = systemInstructions
         if !relevant.isEmpty {
             let formatter = DateFormatter()
             formatter.dateFormat = "M月d日 HH:mm"
             let lines = relevant.map { "- [\(formatter.string(from: $0.timestamp))] \($0.text)" }
-            let context = "以下是用户过去说过、可能相关的内容：\n" + lines.joined(separator: "\n")
-            client.sendContext(context)
+            instructions += "\n\n以下是用户过去说过、可能相关的内容，如果有帮助请参考：\n" + lines.joined(separator: "\n")
         }
 
-        client.requestResponse()
+        client.updateInstructions(instructions) { [weak self] in
+            self?.client.requestResponse()
+        }
     }
 
     private func appendToAssistantLine(_ delta: String) {

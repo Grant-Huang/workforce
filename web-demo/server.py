@@ -18,6 +18,8 @@ import websockets
 from aiohttp import web, WSMsgType
 from dotenv import load_dotenv
 
+import agentnexus_mock
+
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR.parent / ".env")
 
@@ -83,8 +85,10 @@ app = web.Application()
 app.router.add_get("/", index)
 app.router.add_get("/api/config", config)
 app.router.add_get("/ws", relay)
+agentnexus_mock.register(app)
 app.router.add_static("/static/", BASE_DIR / "static")
 
 if __name__ == "__main__":
     print(f"Model: {QWEN_MODEL}  Voice: {QWEN_VOICE}  Key loaded: {bool(QWEN_API_KEY)}")
+    print("AgentNexus mock: /agentnexus-mock/* (see agentnexus_mock.py)")
     web.run_app(app, host="127.0.0.1", port=8765)

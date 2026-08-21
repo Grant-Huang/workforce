@@ -96,57 +96,78 @@ body {
   position: sticky;
   bottom: 0;
   display: flex;
-  gap: 12px;
-  justify-content: center;
+  flex-direction: column;
   align-items: center;
-  padding: 18px;
-  background: linear-gradient(to top, var(--bg) 60%, transparent);
+  gap: 14px;
+  padding: 16px 18px 22px;
+  background: linear-gradient(to top, var(--bg) 65%, transparent);
 }
 
-.btn {
-  border: none;
-  border-radius: 999px;
-  padding: 14px 28px;
-  font-size: 15px;
-  font-weight: 600;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
+.textRow {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
   gap: 8px;
-  transition: opacity 0.15s ease, transform 0.1s ease;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 6px 6px 18px;
 }
 
-.btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+.textInput {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 15px;
+  background: transparent;
+  color: var(--text);
 }
 
-.btn:active:not(:disabled) {
-  transform: scale(0.97);
-}
-
-.btn-start {
+.sendBtn {
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
   background: var(--accent);
   color: white;
+  font-size: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
 }
 
-.btn-stop {
-  background: var(--danger);
-  color: white;
+.sendBtn:active {
+  transform: scale(0.95);
 }
 
-.dot {
-  width: 8px;
-  height: 8px;
+/* Single start/stop toggle button — one control, two visual states. */
+.micBtn {
+  width: 72px;
+  height: 72px;
+  border: none;
   border-radius: 50%;
-  background: currentColor;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s ease, transform 0.1s ease;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
 }
 
-.btn-start.listening .dot {
-  animation: pulse 1s infinite;
+.micBtn:active {
+  transform: scale(0.96);
 }
 
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
+.micBtn.active {
+  background: var(--danger);
+}
+
+.micBtn.speaking {
+  animation: speakingPulse 1.1s ease-in-out infinite;
+}
+
+@keyframes speakingPulse {
+  0%, 100% { box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12); }
+  50% { box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12), 0 0 0 10px rgba(229, 72, 77, 0.15); }
 }

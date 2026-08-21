@@ -19,6 +19,9 @@ final class RealtimeClient: NSObject {
     var onError: ((String) -> Void)?
     var onDisconnect: ((Error?) -> Void)?
 
+    /// Resolved on the next `session.updated` event — see `updateInstructions`.
+    private var pendingInstructionsAck: (() -> Void)?
+
     override init() {
         self.session = URLSession(configuration: .default)
         super.init()
@@ -68,10 +71,14 @@ final class RealtimeClient: NSObject {
         send(RealtimeOutgoingEvent.inputAudioAppend(base64Audio: data.base64EncodedString()))
     }
 
-    /// Hands the model a piece of background context (e.g. retrieved local memory)
-    /// ahead of the next `requestResponse()` call.
-    func sendContext(_ text: String) {
-        send(RealtimeOutgoingEvent.conversationItemCreate(text: text))
+    /// Patches the session's system instructions (e.g. base prompt + retrieved local
+    /// memory) and calls `completion` once the server confirms it via `session.updated`.
+    /// Callers must wait for that ack before calling `requestResponse()` — sending a
+    /// second `session.update` before the first is acked raced and produced an empty
+    /// reply in testing (see `RealtimeOutgoingEvent.sessionInstructionsPatch`).
+    func updateInstructions(_ instructions: String, completion: @escaping () -> Void) {
+        pendingInstructionsAck = completion
+        send(RealtimeOutgoingEvent.sessionInstructionsPatch(instructions: instructions))
     }
 
     /// Triggers response generation — required when the session was configured with
@@ -131,6 +138,9 @@ final class RealtimeClient: NSObject {
             onUserTranscript?(text)
         case .speechStarted:
             onSpeechStarted?()
+        case .sessionUpdated:
+            pendingInstructionsAck?()
+            pendingInstructionsAck = nil
         case .responseDone:
             onResponseDone?()
         case .error(let message):
