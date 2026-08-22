@@ -165,6 +165,12 @@ Sources: [限流文档](https://help.aliyun.com/zh/model-studio/rate-limit) · [
 
 对代码设计的影响：`sendSessionUpdateAndWait` 的超时兜底（4 秒放弃等待 ack、继续走下去）已经覆盖了"静默不回应"这种情况，不需要额外改动——这次复测算是为这个已有的兜底设计提供了一次真实的验证场景。
 
+**2026-08-22 第三次复现，怀疑不只是限流残留。** 又一次 PR check-in 里补测：这次是"干净"状态下的单次连接尝试（之前没有连续建立多条连接），baseline 连通性检查也刚成功过。结果还是同样的模式——连接成功、第一次 `session.update`（初始配置）成功拿到 `session.updated`，但紧接着发的第二次 `session.update`（第一轮记忆 patch）完全静默、10 秒超时。**三次独立测试，三次都是死在"同一条连接上的第二次 `session.update`"这个精确位置**，不只是死在"连了很多次之后"。
+
+这动摇了"纯粹是账号级限流残留"这个解释——如果只是限流没恢复，baseline 检查（一次简单的连接+读 `session.created`）应该也会失败或者更早就失败，但它每次都成功；问题精确地卡在"同一条连接发第二个 `session.update`"这个动作上。这跟 App 和网页 demo 的核心记忆注入机制（`updateInstructionsAndWait`：每一轮对话都要在同一条连接上再发一次 `session.update` 来 patch 记忆）用的是完全一样的模式——如果这不是限流而是一个更普遍的稳定性问题，会直接影响真实用户的多轮对话体验，不只是测试脚本的问题。
+
+**目前还没法下结论**是限流的一种更隐蔽表现，还是 Qwen Realtime API 本身在"同连接连续两次 session.update"这个操作上有真实的稳定性问题。现有的 4 秒超时兜底能保证不卡死，但如果这个模式真的很常见，用户体验上会表现为"经常有一轮对话感觉像是没听懂/没用上最新记忆"——因为超时之后代码会带着过期的 instructions 继续，而不是真的没有兜底。下次需要专门设计一个排除法：比如同一条连接上，第二次发送的不是 `session.update` 而是别的消息类型（看是不是所有"连续两次交互"都会卡，还是专门针对 `session.update` 这个类型），或者在两次 `session.update` 之间加更长的间隔（比如 30 秒）看会不会消失。
+
 ## 文件说明
 
 - `server.py` — 中转服务（aiohttp）：serve 静态文件 + `/api/config` + `/ws`（转发到 DashScope）+ 挂载 AgentNexus Mock 路由。
