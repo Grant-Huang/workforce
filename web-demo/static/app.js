@@ -33,7 +33,36 @@ let assistantHasDelta = false;
 let voice = "Chelsie";
 let startPromise = null; // in-flight start(), so typed messages can await a session already starting
 
-function setState(next) {
+// ---- connection lifecycle ----
+//
+// Three rules, in order of how the demo satisfies them:
+// (a) A connection attempt that never actually establishes a working session (socket
+//     error, relay reports the upstream connect failed, or the socket opens but
+//     session.created never arrives — the "哑掉" failure mode from the README) must
+//     tell the user, not fail silently or leave the UI stuck in "连接中…".
+// (b) Once connected, never release the connection on our own initiative — only the
+//     user's stop button, a genuine connect failure, or (c) below closes it.
+// (c) If the user goes quiet for a long time while connected, release the connection
+//     proactively rather than holding it open indefinitely.
+const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // no user turn for this long while connected -> hang up
+const CONNECT_TIMEOUT_MS = 8000; // socket opened but no session.created within this long -> treat as a failed connect
+let idleTimer = null;
+let connectTimeoutId = null;
+let lastConnErrorMessage = null; // set by ws.onerror / relay.error just before the socket closes, so stop() can surface the real reason instead of the generic "未连接" label
+
+function armIdleTimer() {
+  clearIdleTimer();
+  idleTimer = setTimeout(() => stop("长时间没有说话，已自动挂断"), IDLE_TIMEOUT_MS);
+}
+
+function clearIdleTimer() {
+  if (idleTimer) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+}
+
+function setState(next, statusOverride) {
   state = next;
   const label = {
     [STATE.IDLE]: "未连接",
@@ -41,12 +70,24 @@ function setState(next) {
     [STATE.LISTENING]: "正在聆听…",
     [STATE.SPEAKING]: "助手正在说话…",
   }[next];
-  statusEl.textContent = label;
+  statusEl.textContent = statusOverride || label;
 
   micBtn.classList.toggle("active", next !== STATE.IDLE);
   micBtn.classList.toggle("speaking", next === STATE.SPEAKING);
   micIcon.style.display = next === STATE.IDLE ? "block" : "none";
   stopIcon.style.display = next === STATE.IDLE ? "none" : "block";
+
+  // LISTENING means "connected, waiting on the user" — the only state that should
+  // count toward (c)'s idle clock. CONNECTING/SPEAKING/IDLE all clear it: still
+  // connecting or the assistant is talking isn't "user went quiet", and IDLE means
+  // there's nothing to release.
+  if (next === STATE.LISTENING) armIdleTimer();
+  else clearIdleTimer();
+
+  if (next !== STATE.CONNECTING && connectTimeoutId) {
+    clearTimeout(connectTimeoutId);
+    connectTimeoutId = null;
+  }
 }
 
 function addBubble(role, text) {
@@ -286,7 +327,8 @@ function handleServerEvent(json) {
       statusEl.textContent = `出错：${json.error?.message || "unknown"}`;
       break;
     case "relay.error":
-      statusEl.textContent = `连接失败：${json.message}`;
+      lastConnErrorMessage = `连接失败：${json.message}`;
+      statusEl.textContent = lastConnErrorMessage;
       break;
     default:
       break; // ignore anything we don't handle
@@ -333,10 +375,15 @@ async function start() {
       silentGain.connect(captureCtx.destination);
     }
 
+    lastConnErrorMessage = null;
     await new Promise((resolveOpen, rejectOpen) => {
       ws = new WebSocket(`ws://${location.host}/ws`);
       ws.onopen = resolveOpen;
-      ws.onerror = () => { statusEl.textContent = "WebSocket 出错"; rejectOpen(new Error("ws error")); };
+      ws.onerror = () => {
+        lastConnErrorMessage = "连接失败：WebSocket 出错，请检查网络后重试";
+        statusEl.textContent = lastConnErrorMessage;
+        rejectOpen(new Error("ws error"));
+      };
       ws.onmessage = (event) => {
         try {
           handleServerEvent(JSON.parse(event.data));
@@ -344,10 +391,27 @@ async function start() {
           console.error("bad server message", event.data);
         }
       };
-      ws.onclose = () => { if (state !== STATE.IDLE) stop(); };
+      // Fires on any close, ours or the server's. stop() itself already sets state to
+      // IDLE before calling ws.close(), so the `state !== IDLE` guard here only fires
+      // for closes we didn't initiate (server dropped us, relay.error, network loss) —
+      // those still need the same teardown + user-facing message stop() gives.
+      ws.onclose = () => {
+        if (state !== STATE.IDLE) stop(lastConnErrorMessage || "连接已断开");
+        lastConnErrorMessage = null;
+      };
     }).catch(() => {});
 
     if (ws && ws.readyState === WebSocket.OPEN) {
+      // Belt-and-suspenders for (a): if the socket opens but the session never actually
+      // comes up — no session.created, ever — the demo would otherwise sit at "连接中…"
+      // forever. This is a real observed failure mode (see README's "连接多了之后会
+      // '哑掉'"), not a hypothetical. session.created moves state to LISTENING, which
+      // clears this timer; if that hasn't happened within CONNECT_TIMEOUT_MS, give up
+      // and tell the user rather than hanging silently.
+      connectTimeoutId = setTimeout(() => {
+        if (state === STATE.CONNECTING) stop("连接超时，请重试");
+      }, CONNECT_TIMEOUT_MS);
+
       // Wait for the initial session.update to be acked (session.updated), not just
       // sent — sending a second session.update (the per-turn memory patch) before
       // this one lands raced and produced an empty reply in testing. Has its own
@@ -367,6 +431,15 @@ async function start() {
           create_response: false,
         },
       });
+    } else {
+      // Socket never opened (ws.onerror already set an explanatory message) — release
+      // whatever we grabbed before attempting the connection and go back to idle so
+      // the user can retry instead of being stuck mid-"连接中…".
+      if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+      if (captureCtx) { captureCtx.close(); captureCtx = null; }
+      if (playCtx) { playCtx.close(); playCtx = null; }
+      ws = null;
+      setState(STATE.IDLE, lastConnErrorMessage || "连接失败，请稍后重试");
     }
   })();
 
@@ -377,7 +450,16 @@ async function start() {
   }
 }
 
-function stop() {
+function stop(reason) {
+  // A patch we're mid-wait on (updateInstructionsAndWait/sendSessionUpdateAndWait) can
+  // no longer be acked once we're tearing the connection down — resolve it now instead
+  // of leaving it to time out on its own, so callers awaiting it aren't stuck holding
+  // a stale in-flight start()/turn.
+  if (pendingInstructionsAck) {
+    pendingInstructionsAck();
+    pendingInstructionsAck = null;
+  }
+
   if (ws) {
     ws.close();
     ws = null;
@@ -402,7 +484,7 @@ function stop() {
 
   assistantBubbleEl = null;
   assistantHasDelta = false;
-  setState(STATE.IDLE);
+  setState(STATE.IDLE, reason);
 }
 
 micBtn.addEventListener("click", () => {
