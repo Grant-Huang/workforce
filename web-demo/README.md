@@ -157,6 +157,14 @@ App 请求语音连接时的三条规则，以及 `static/app.js` 里的落地�
 
 Sources: [限流文档](https://help.aliyun.com/zh/model-studio/rate-limit) · [错误码文档](https://help.aliyun.com/zh/model-studio/error-code) · [Qwen2.5-Omni GitHub](https://github.com/QwenLM/Qwen2.5-Omni) · [Qwen3-Omni GitHub](https://github.com/QwenLM/Qwen3-Omni) · [Kyutai Moshi GitHub](https://github.com/kyutai-labs/moshi)
 
+## 限流的另一种表现：静默超时，不只是 1011 报错（2026-08-22 补充）
+
+之前记录的都是连接被显式拒绝（`1011 Too many requests`）。这次 check-in 补测发现了另一种表现：**连接和第一次 `session.update` 都成功了（收到 `session.created` 和 `session.updated`），但紧接着发的第二次 `session.update`（每轮记忆 patch 用的那种）完全没有任何响应——不报错、不返回 `session.updated`，就是安静下来，10 秒超时后只能自己放弃**。两次独立测试复现了同样的模式（都是死在"这条连接上的第二次 `session.update`"），第三次追加测试（在两次 update 之间加了 5 秒间隔）则是在第一次 `session.update` 上就直接收到了显式的 `1011`。
+
+这说明限流在临近触发阈值时可能有个渐进过程：先是"接受连接、但后续交互被静默丢弃"，账号被判定为更明确超限之后才会开始直接用 `1011` 拒绝。也印证了 8-21 那次"哑掉"现象记录里的猜测——两种表现（静默不回应 / 显式 1011）很可能是同一个限流机制在不同压力程度下的不同反应，不是两个独立问题。
+
+对代码设计的影响：`sendSessionUpdateAndWait` 的超时兜底（4 秒放弃等待 ack、继续走下去）已经覆盖了"静默不回应"这种情况，不需要额外改动——这次复测算是为这个已有的兜底设计提供了一次真实的验证场景。
+
 ## 文件说明
 
 - `server.py` — 中转服务（aiohttp）：serve 静态文件 + `/api/config` + `/ws`（转发到 DashScope）+ 挂载 AgentNexus Mock 路由。
