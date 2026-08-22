@@ -61,6 +61,28 @@ body {
   font-size: 14px;
 }
 
+.suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.suggestionChip {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.suggestionChip:active {
+  transform: scale(0.97);
+}
+
 .bubble-row {
   max-width: 720px;
   margin: 0 auto 14px;

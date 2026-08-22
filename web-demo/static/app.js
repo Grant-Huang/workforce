@@ -410,11 +410,10 @@ micBtn.addEventListener("click", () => {
   else stop();
 });
 
-textForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const text = textInput.value.trim();
+/** Shared by both the text input and the time-based suggestion chips. */
+async function sendTextMessage(text) {
+  text = text.trim();
   if (!text) return;
-  textInput.value = "";
 
   if (state === STATE.IDLE) await start();
   addBubble("user", text);
@@ -423,7 +422,41 @@ textForm.addEventListener("submit", async (event) => {
     item: { type: "message", role: "user", content: [{ type: "input_text", text }] },
   });
   handleUserTurn(text);
+}
+
+textForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = textInput.value;
+  textInput.value = "";
+  await sendTextMessage(text);
 });
+
+// ---- time-based suggestion chips ----
+//
+// Deliberately restrained: no auto-connect, no auto-speak on open. Just 0-3 tappable
+// suggestions in the empty state, chosen by time of day, that kick off a normal typed
+// turn when tapped — same path as typing it yourself. Nothing shown outside these
+// windows rather than forcing an always-on suggestion.
+function getTimeSuggestions() {
+  const hour = new Date().getHours();
+  if (hour < 12) return [{ label: "查一下今天的日程安排", query: "查一下我今天的日程安排" }];
+  if (hour >= 17) return [{ label: "总结复盘一下今天的工作", query: "帮我总结复盘一下今天的工作" }];
+  return [];
+}
+
+function renderSuggestions() {
+  const container = document.getElementById("suggestions");
+  const suggestions = getTimeSuggestions();
+  container.innerHTML = "";
+  for (const s of suggestions) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "suggestionChip";
+    chip.textContent = s.label;
+    chip.addEventListener("click", () => sendTextMessage(s.query));
+    container.appendChild(chip);
+  }
+}
 
 (async () => {
   try {
@@ -436,4 +469,5 @@ textForm.addEventListener("submit", async (event) => {
   }
 })();
 
+renderSuggestions();
 setState(STATE.IDLE);
