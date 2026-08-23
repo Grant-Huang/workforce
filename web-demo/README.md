@@ -180,6 +180,22 @@ Sources: [限流文档](https://help.aliyun.com/zh/model-studio/rate-limit) · [
 
 对我们代码设计的意义没有变化：现有的超时兜底该保留、该用；但不要往"只要在两次 session.update 之间加个延迟就能解决"这个方向去改代码——这次测试反而说明加延迟不保证有用，问题的根子在服务端当前的稳定性上，不是我们请求节奏的问题。
 
+## 重大突破：换成专属域名 + 新模型后，稳定性问题彻底消失（2026-08-23）
+
+拿到了真实的 Workspace ID（格式是 `llm-xxxxxxxxxxxxxxxx`，不是之前误传的纯数字账号 ID——账号 ID 和 Workspace ID 是两个完全不同的东西，获取方式见 [官方文档](https://help.aliyun.com/zh/model-studio/obtain-the-app-id-and-workspace-id)）之后，用专属域名 `wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime` + 新模型 `qwen3.5-omni-plus-realtime` 重新测试：
+
+**单轮测试**：连接、`session.update`、完整问答，全部在 4.5 秒内干净走完，没有任何超时。
+
+**多轮测试**（重跑之前反复失败的日程问答场景，同一条连接上连续 4 轮）：**4/4 全部正确**，包括最关键的"背景信息里没有相关内容时应该诚实说不知道，而不是编造"这道之前一直失败的题——这次准确答出"我今天这边查不到你今天的安排记录，要不你跟我说说……"。每一轮的 `session.update` 都在 0.3 秒内收到 `session.updated` 确认，没有一次卡住。
+
+**两个额外发现**：
+- 新模型不接受 `Chelsie` 这个音色（报错 `Voice 'Chelsie' is not supported.`），换成 `Ethan`（官方默认音色）之后正常。旧模型 `qwen-omni-turbo-realtime` 用的音色列表和新模型不通用，切换时要一并检查。
+- 报错这件事本身也是个信号：专属域名对不支持的参数会**立刻、清晰地报错**，不是像共享域名那样"该报错的时候不报错，直接哑火"——这本身就是稳定性差异的一种体现。
+
+**结论**：连续几天反复出现的"`session.update` 发出去没反应"这个问题，看起来根源就是共享域名（`dashscope.aliyuncs.com`）本身的问题——不管是"中心化共享域名没有流量隔离"这个官方文档暗示的原因，还是别的什么，**换成专属域名之后这个问题彻底消失了**。之前那么多次"限流""哑火""不稳定"的排查，最后的答案很可能一直都是"用错域名了"。
+
+后续要做的：把 App（iOS + 网页 demo）的默认配置切换到这套新组合——专属域名 + `qwen3.5-omni-plus-realtime` + `Ethan`，Workspace ID 需要做成一个新的用户可配置项（不能硬编码），并且要顺带处理好"用户还没填 Workspace ID 时的默认行为"（比如回退到共享域名 + 旧模型，并提示用户去配置专属域名以获得更好的稳定性）。
+
 ## 文件说明
 
 - `server.py` — 中转服务（aiohttp）：serve 静态文件 + `/api/config` + `/ws`（转发到 DashScope）+ 挂载 AgentNexus Mock 路由。
