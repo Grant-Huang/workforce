@@ -205,7 +205,7 @@ App 里实际上有三种不同的"用户怎么把话传给模型"的方式，�
 
 两者是**两个独立的连接持有者**，各自一个状态机、各自的 `RealtimeClient`/`ws` 实例——跟 `DictationViewModel` 当初刻意跟 `ConversationViewModel` 分开管理是同一条原则（避免两套状态机纠缠），这次是把这条原则从"口述 vs 对话"扩展到"文本会话 vs 语音会话"这一层。
 
-**技术实现方向**：文本会话依然复用 Realtime WebSocket 这套协议机制（不是切换成一次性 HTTP 补全调用）——原因是现有的记忆检索/注入逻辑（`groundAndRespond`/`handleUserTurn`：查记忆→`session.update` patch instructions→`response.create`）是深度绑定在 Realtime 协议上的，改用无状态的 HTTP 补全调用意味着要把这套逻辑重写一遍（每次请求都要带上完整上下文，因为没有"会话"可以 patch 了），成本远大于收益。文本会话的连接只是**不接麦克风、不采集音频**，并且把 `session.update.modalities` 设成只有 `["text"]`（不含 `"audio"`），让服务端从会话层面就不生成语音——这是**待验证的实现细节**，不是已经确认可行的结论：`modalities` 这个字段本身已经在这个 App 里反复用过（`["text","audio"]`），但"只设 `["text"]` 能不能让服务端完全不生成音频、协议其余部分是否照常工作"没有实测过，动手时要先验证，不能假设它就是理所当然生效的。
+**技术实现方向**：文本会话依然复用 Realtime WebSocket 这套协议机制（不是切换成一次性 HTTP 补全调用）——原因是现有的记忆检索/注入逻辑（`groundAndRespond`/`handleUserTurn`：查记忆→`session.update` patch instructions→`response.create`）是深度绑定在 Realtime 协议上的，改用无状态的 HTTP 补全调用意味着要把这套逻辑重写一遍（每次请求都要带上完整上下文，因为没有"会话"可以 patch 了），成本远大于收益。文本会话的连接只是**不接麦克风、不采集音频**，并且把 `session.update.modalities` 设成只有 `["text"]`（不含 `"audio"`），让服务端从会话层面就不生成语音——**已实测确认（2026-08-23）**：直接连真实 `qwen3.5-omni-flash-realtime` 测过，`session.update.modalities: ["text"]` 被服务端接受并正确回显，产生的回复完全不含任何音频相关事件（`response.audio.delta`、`response.audio_transcript.*` 一个都不出现，`got_audio_event: False`），协议其余部分照常工作——事件序列是 `conversation.item.created` → `response.created` → `response.output_item.added` → `conversation.item.created` → `response.content_part.added` → `response.text.delta`（×N）→ `response.text.done` → `response.content_part.done` → `response.output_item.done` → `response.done`，回复通过全新的一对事件 `response.text.delta`/`response.text.done` 返回（不是语音会话用的 `response.audio_transcript.*`）。web 端已经按这个实测结果实现并通过 Playwright 端到端验证，详见下面 8.5 和 `roadmap-todo.md`。
 
 **口述转文字的"直接发"路径要改指向**：`promoteDictationConnection`（网页）/`DictationViewModel.finishForDirectSend()` + `sendText(_:reusing:)`（iOS）现在是把口述连接过户给"语音会话"（会打开麦克风、说出语音回复）——这跟新设计矛盾。改成过户给"文本会话"之后，其实**更贴合口述连接本来的性质**：口述连接从录音开始就没有"持续开麦、语音回复"这些语义（`create_response:false`，只转写），过户给"文本会话"只需要 patch `instructions` + 确保 `modalities` 是纯文字，不需要额外接麦克风——比过户给"语音会话"更自然，不是额外负担。
 
@@ -225,7 +225,7 @@ App 里实际上有三种不同的"用户怎么把话传给模型"的方式，�
 
 ### 8.5 实施顺序（并入阶段 2，不单独插队）
 
-1. 文本会话/语音会话状态机拆分（web 先做，验证 `modalities: ["text"]` 能不能让服务端不生成语音，验证口述"直接发"过户到文本会话正确工作），再port到 iOS
+1. 文本会话/语音会话状态机拆分——**web 端已完成并通过 Playwright 验证（2026-08-23）**：`modalities: ["text"]` 已实测确认能让服务端不生成语音，口述"直接发"过户到文本会话已验证正确工作。iOS 端还没 port，是接下来要做的。
 2. 共享历史结构 + 助手回复推送 AgentNexus + 本地持久化
 3. 语音会话进行中隐藏转写 + 展示动效球（依赖第 1 步先完成）
 4. 动效球的具体视觉效果（`AnalyserNode`/音量驱动的动画）——这条本身工作量不小，是一个独立的小型 UI 组件，先做出能跑的版本（哪怕视觉效果朴素），细致打磨可以晚一点

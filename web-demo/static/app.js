@@ -8,6 +8,13 @@
 // turn_detection.create_response is false, so nothing auto-replies — every user turn
 // (typed or transcribed) goes through handleUserTurn, which searches local memory,
 // injects what's relevant as background context, then explicitly requests a reply.
+//
+// Two independent connections/state machines (docs/app-design.md section 8): the voice
+// session (ws/STATE, mic + spoken replies, "point mic and talk") and the text session
+// (textWs/TEXT_STATE, typing + dictation-to-text output, never touches the mic, reply
+// is text-only via modalities: ["text"] — no "正在聆听" state ever shows for this one).
+// They used to be the same connection; splitting them fixed a real bug where typing a
+// message opened the microphone and played a spoken reply.
 
 const chatEl = document.getElementById("chat");
 const emptyEl = document.getElementById("empty");
@@ -179,7 +186,8 @@ function base64ToInt16(base64) {
 // <audio>/<video> element playback but is NOT guaranteed for raw Web Audio API output
 // straight to .destination -- a known, documented gap, not a guess. Routing through an
 // <audio> element is the standard workaround. Combined with explicitly requesting
-// echoCancellation on the mic (see start()/startDictation()/promoteDictationConnection()).
+// echoCancellation on the mic (see start()/startDictation() -- neither the text session
+// nor its promoteDictationConnectionToTextSession() touch the mic at all).
 // This couldn't be verified with a real speaker+mic acoustic loop in this sandbox (no
 // real audio hardware here) -- it addresses the documented likely cause, but needs
 // hands-on confirmation on a real device.
@@ -227,11 +235,22 @@ function stopPlayback() {
 }
 
 // ---- realtime session ----
+//
+// Two independent connections/state machines share this protocol layer: the voice
+// session (ws/state, mic + TTS, unchanged) and the text session (textWs/textState,
+// added for docs/app-design.md section 8 -- typing and dictation-to-text both land
+// here, never touch the mic, never get a spoken reply). sendEventOn/handleUserTurn
+// take an explicit target so the shared grounding logic (memory search, instructions
+// patch, response.create) works for either without duplicating it.
+
+function sendEventOn(targetWs, payload) {
+  if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+    targetWs.send(JSON.stringify(payload));
+  }
+}
 
 function sendEvent(payload) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(payload));
-  }
+  sendEventOn(ws, payload);
 }
 
 const BASE_INSTRUCTIONS = `你是一个语音助手，正在和用户实时语音对话。
@@ -251,51 +270,76 @@ const BASE_INSTRUCTIONS = `你是一个语音助手，正在和用户实时语�
 - 如果问题明显需要用户之前提到的具体信息（比如某个日程、决定、事实），但背景信息里完全没有相关内容，不要编造答案——诚实说明你目前没有这方面的记录，比如"这个我目前没有相关记录"或者"这个我还得再查一下"，可以顺带问用户要不要现在告诉你。
 - 常识性、闲聊性的问题正常回答，不用刻意强调"没有记录"。`;
 
-// Resolver for whichever session.update we're currently waiting to be acked (see
-// updateInstructionsAndWait). Tested directly against Qwen: a `conversation.item.create`
-// with role "system" (or a fake "assistant" turn) is silently ignored by the model —
-// only content actually in `session.update.session.instructions` gets used. Firing a
-// second session.update before the first is acked also produced an empty reply in
-// testing, so this waits for `session.updated` before doing anything else.
-//
-// That wait isn't fully reliable either, though: in further testing the ack for a
-// per-turn patch occasionally never arrived at all (server-side flakiness, not a
-// reproducible ordering bug) — so this has a timeout fallback. Missing the ack means
-// the model might answer on slightly stale instructions for that one turn rather than
-// the conversation hanging forever, which is the better failure mode.
-let pendingInstructionsAck = null;
+/**
+ * Factory for "send a session.update, wait for its session.updated ack" -- one instance
+ * per connection (voiceSession/textSession below), so the two connections' in-flight
+ * patches never step on each other. Tested directly against Qwen: a
+ * `conversation.item.create` with role "system" (or a fake "assistant" turn) is
+ * silently ignored by the model — only content actually in
+ * `session.update.session.instructions` gets used. Firing a second session.update
+ * before the first is acked also produced an empty reply in testing, so this waits for
+ * `session.updated` before doing anything else.
+ *
+ * That wait isn't fully reliable either, though: in further testing the ack for a
+ * per-turn patch occasionally never arrived at all (server-side flakiness, not a
+ * reproducible ordering bug) — so this has a timeout fallback. Missing the ack means
+ * the model might answer on slightly stale instructions for that one turn rather than
+ * the conversation hanging forever, which is the better failure mode.
+ */
+function makeSessionUpdateWaiter(getWs) {
+  let pendingAck = null;
 
-function sendSessionUpdateAndWait(sessionPatch, timeoutMs = 4000) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      if (pendingInstructionsAck === finish) pendingInstructionsAck = null;
-      resolve();
-    };
-    pendingInstructionsAck = finish;
-    sendEvent({ type: "session.update", session: sessionPatch });
-    setTimeout(finish, timeoutMs);
-  });
+  function sendSessionUpdateAndWait(sessionPatch, timeoutMs = 4000) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (pendingAck === finish) pendingAck = null;
+        resolve();
+      };
+      pendingAck = finish;
+      sendEventOn(getWs(), { type: "session.update", session: sessionPatch });
+      setTimeout(finish, timeoutMs);
+    });
+  }
+
+  function updateInstructionsAndWait(instructions, timeoutMs = 4000) {
+    return sendSessionUpdateAndWait({ instructions }, timeoutMs);
+  }
+
+  /** Called from the connection's session.updated handler. */
+  function resolveAck() {
+    if (pendingAck) {
+      pendingAck();
+      pendingAck = null;
+    }
+  }
+
+  return { sendSessionUpdateAndWait, updateInstructionsAndWait, resolveAck };
 }
 
-function updateInstructionsAndWait(instructions, timeoutMs = 4000) {
-  return sendSessionUpdateAndWait({ instructions }, timeoutMs);
-}
+const voiceUpdater = makeSessionUpdateWaiter(() => ws);
+const textUpdater = makeSessionUpdateWaiter(() => textWs);
+const voiceSession = { getWs: () => ws, updater: voiceUpdater };
+const textSession = { getWs: () => textWs, updater: textUpdater };
 
 /**
- * Every user turn — typed or transcribed from voice — comes through here.
- * Mirrors ConversationViewModel.groundAndRespond: search local memory, patch the
- * session's instructions with what's relevant, then explicitly trigger a reply (the
+ * Every user turn — typed, dictated, or transcribed from live voice — comes through
+ * here. Mirrors ConversationViewModel.groundAndRespond: search local memory, patch the
+ * session's instructions with what's relevant, then explicitly trigger a reply (every
  * session runs with create_response:false, so nothing replies on its own).
+ *
+ * `session` bundles which connection this turn belongs to -- voiceSession for live
+ * voice conversation, textSession for typed/dictated text (see docs/app-design.md
+ * section 8: these are two independent connections now, not one shared one).
  *
  * An explicit "记住…" turn takes a different path: it writes a curated entry into
  * AgentNexus's structured memory layers (not just the raw message log every turn
  * gets) and skips memory retrieval — it's a command, not a question, so the model
  * just needs to briefly confirm rather than search-and-answer.
  */
-async function handleUserTurn(text) {
+async function handleUserTurn(text, session) {
   const saveIntent = SaveIntent.detect(text);
   AgentNexusBridge.pushMessage(text, "user");
 
@@ -307,8 +351,8 @@ async function handleUserTurn(text) {
       console.warn("save-intent write to AgentNexus failed (stayed local only):", e);
     }
     const instructions = `${BASE_INSTRUCTIONS}\n\n用户刚才明确要求记住这件事："${saveIntent.content}"，你已经帮TA记下了。只需要简短确认一句就行，不要复述内容、不要追问。`;
-    await updateInstructionsAndWait(instructions);
-    sendEvent({ type: "response.create" });
+    await session.updater.updateInstructionsAndWait(instructions);
+    sendEventOn(session.getWs(), { type: "response.create" });
     return;
   }
 
@@ -318,12 +362,12 @@ async function handleUserTurn(text) {
   if (relevant.length > 0) {
     const lines = relevant.map((e) => `- ${e.text}`);
     const instructions = `${BASE_INSTRUCTIONS}\n\n以下是用户过去说过、可能相关的内容，如果有帮助请参考：\n${lines.join("\n")}`;
-    await updateInstructionsAndWait(instructions);
+    await session.updater.updateInstructionsAndWait(instructions);
   } else {
-    await updateInstructionsAndWait(BASE_INSTRUCTIONS); // clear out any previous turn's injected memory
+    await session.updater.updateInstructionsAndWait(BASE_INSTRUCTIONS); // clear out any previous turn's injected memory
   }
 
-  sendEvent({ type: "response.create" });
+  sendEventOn(session.getWs(), { type: "response.create" });
 }
 
 function handleServerEvent(json) {
@@ -332,10 +376,7 @@ function handleServerEvent(json) {
       setState(STATE.LISTENING);
       break;
     case "session.updated":
-      if (pendingInstructionsAck) {
-        pendingInstructionsAck();
-        pendingInstructionsAck = null;
-      }
+      voiceUpdater.resolveAck();
       break;
     case "response.audio.delta":
       playPCM16Chunk(json.delta);
@@ -350,7 +391,7 @@ function handleServerEvent(json) {
     case "conversation.item.input_audio_transcription.completed":
       if (json.transcript) {
         addBubble("user", json.transcript);
-        handleUserTurn(json.transcript);
+        handleUserTurn(json.transcript, voiceSession);
       }
       break;
     case "input_audio_buffer.speech_started":
@@ -464,7 +505,7 @@ async function start() {
       // this one lands raced and produced an empty reply in testing. Has its own
       // timeout fallback (see sendSessionUpdateAndWait), so a missing ack here can't
       // hang start() forever either.
-      await sendSessionUpdateAndWait({
+      await voiceUpdater.sendSessionUpdateAndWait({
         modalities: ["audio", "text"],
         instructions: BASE_INSTRUCTIONS,
         voice,
@@ -502,10 +543,7 @@ function stop(reason) {
   // no longer be acked once we're tearing the connection down — resolve it now instead
   // of leaving it to time out on its own, so callers awaiting it aren't stuck holding
   // a stale in-flight start()/turn.
-  if (pendingInstructionsAck) {
-    pendingInstructionsAck();
-    pendingInstructionsAck = null;
-  }
+  voiceUpdater.resolveAck();
 
   if (ws) {
     ws.close();
@@ -541,18 +579,161 @@ micBtn.addEventListener("click", () => {
   else stop();
 });
 
+// ---- text session: typing + dictation-to-text output ----
+//
+// docs/app-design.md section 8: sendTextMessage used to fall through to start(), the
+// same function that opens the live-voice connection -- confirmed via user testing
+// that this meant typing a message actually opened the microphone and played a spoken
+// reply. This is a fully independent connection/state machine from the voice session
+// above: never touches the mic, and `modalities` is ["text"] only, so the server never
+// generates audio for this connection at all -- verified live against
+// qwen3.5-omni-flash-realtime (no audio-related events came back for a text-only
+// session, only response.text.delta/response.text.done, a different event pair than
+// the response.audio_transcript.* ones the voice session uses).
+const TEXT_STATE = { IDLE: "idle", CONNECTING: "connecting", READY: "ready" };
+let textState = TEXT_STATE.IDLE;
+let textWs = null;
+let textStartPromise = null;
+let textIdleTimer = null;
+let textConnectTimeoutId = null;
+let textLastConnErrorMessage = null;
+
+function armTextIdleTimer() {
+  clearTextIdleTimer();
+  textIdleTimer = setTimeout(() => stopTextSession("长时间没有新消息，已自动断开"), IDLE_TIMEOUT_MS);
+}
+
+function clearTextIdleTimer() {
+  if (textIdleTimer) {
+    clearTimeout(textIdleTimer);
+    textIdleTimer = null;
+  }
+}
+
+function setTextState(next) {
+  textState = next;
+  if (next === TEXT_STATE.READY) armTextIdleTimer();
+  else clearTextIdleTimer();
+  renderDictationUI(); // keeps mic/dictate buttons in sync -- see their disabled logic there
+  if (next !== TEXT_STATE.CONNECTING && textConnectTimeoutId) {
+    clearTimeout(textConnectTimeoutId);
+    textConnectTimeoutId = null;
+  }
+}
+
+function handleTextSessionEvent(json) {
+  switch (json.type) {
+    case "session.updated":
+      textUpdater.resolveAck();
+      break;
+    case "response.text.delta":
+      appendToAssistantBubble(json.delta);
+      break;
+    case "response.text.done":
+      setAssistantFinalText(json.text || "");
+      break;
+    case "response.done":
+      assistantBubbleEl = null;
+      assistantHasDelta = false;
+      break;
+    case "error":
+      statusEl.textContent = `出错：${json.error?.message || "unknown"}`;
+      break;
+    case "relay.error":
+      textLastConnErrorMessage = `连接失败：${json.message}`;
+      statusEl.textContent = textLastConnErrorMessage;
+      break;
+    default:
+      break;
+  }
+}
+
+async function startTextSession() {
+  if (textState !== TEXT_STATE.IDLE) return;
+  if (textStartPromise) return textStartPromise;
+
+  textStartPromise = (async () => {
+    setTextState(TEXT_STATE.CONNECTING);
+    await AgentNexusBridge.pullMemory();
+
+    textLastConnErrorMessage = null;
+    await new Promise((resolveOpen) => {
+      const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+      textWs = new WebSocket(`${wsProto}//${location.host}/ws`);
+      textWs.onopen = resolveOpen;
+      textWs.onerror = () => {
+        textLastConnErrorMessage = "连接失败：WebSocket 出错，请检查网络后重试";
+        statusEl.textContent = textLastConnErrorMessage;
+        resolveOpen();
+      };
+      textWs.onmessage = (event) => {
+        try {
+          handleTextSessionEvent(JSON.parse(event.data));
+        } catch (e) {
+          console.error("bad server message", event.data);
+        }
+      };
+      textWs.onclose = () => {
+        if (textState !== TEXT_STATE.IDLE) stopTextSession(textLastConnErrorMessage || "连接已断开");
+        textLastConnErrorMessage = null;
+      };
+    });
+
+    if (textWs && textWs.readyState === WebSocket.OPEN) {
+      textConnectTimeoutId = setTimeout(() => {
+        if (textState === TEXT_STATE.CONNECTING) stopTextSession("连接超时，请重试");
+      }, CONNECT_TIMEOUT_MS);
+
+      await textUpdater.sendSessionUpdateAndWait({
+        modalities: ["text"],
+        instructions: BASE_INSTRUCTIONS,
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.5,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 500,
+          create_response: false,
+        },
+      });
+      setTextState(TEXT_STATE.READY);
+    } else {
+      textWs = null;
+      setTextState(TEXT_STATE.IDLE);
+      statusEl.textContent = textLastConnErrorMessage || "连接失败，请稍后重试";
+    }
+  })();
+
+  try {
+    await textStartPromise;
+  } finally {
+    textStartPromise = null;
+  }
+}
+
+function stopTextSession(reason) {
+  textUpdater.resolveAck();
+  if (textWs) {
+    textWs.close();
+    textWs = null;
+  }
+  assistantBubbleEl = null;
+  assistantHasDelta = false;
+  setTextState(TEXT_STATE.IDLE);
+  if (reason) statusEl.textContent = reason;
+}
+
 /** Shared by both the text input and the time-based suggestion chips. */
 async function sendTextMessage(text) {
   text = text.trim();
   if (!text) return;
 
-  if (state === STATE.IDLE) await start();
+  if (textState === TEXT_STATE.IDLE) await startTextSession();
   addBubble("user", text);
-  sendEvent({
+  sendEventOn(textWs, {
     type: "conversation.item.create",
     item: { type: "message", role: "user", content: [{ type: "input_text", text }] },
   });
-  handleUserTurn(text);
+  handleUserTurn(text, textSession);
 }
 
 textForm.addEventListener("submit", async (event) => {
@@ -588,6 +769,12 @@ let dictationProcessorNode = null;
 let dictationMicStream = null;
 let dictationRawText = "";
 
+// Mutual exclusion across all three input modes (voice session / text session /
+// dictation): only one may be active at a time. This isn't just UX tidiness -- text
+// session and voice session share the same assistantBubbleEl/assistantHasDelta state
+// used to build the streaming reply bubble (docs/app-design.md section 8's shared
+// history space), so two of them replying concurrently would corrupt each other's
+// bubble. Simplest correct fix is not letting that happen in the first place.
 function renderDictationUI() {
   const isDictating = dictationState !== DICTATION_STATE.IDLE;
   composerRow.style.display = isDictating ? "none" : "flex";
@@ -596,14 +783,16 @@ function renderDictationUI() {
   const busy = dictationState !== DICTATION_STATE.IDLE;
   dictationStopBtn.disabled = dictationState !== DICTATION_STATE.RECORDING;
   dictationSendBtn.disabled = dictationState !== DICTATION_STATE.RECORDING;
-  dictateBtn.disabled = state !== STATE.IDLE; // can't dictate while a live conversation is connected
-  micBtn.disabled = busy; // can't start a live conversation while dictating
+  // can't dictate while a live voice conversation OR a text session is connected
+  dictateBtn.disabled = state !== STATE.IDLE || textState !== TEXT_STATE.IDLE;
+  micBtn.disabled = busy || textState !== TEXT_STATE.IDLE; // can't start voice while dictating or texting
+  textInput.disabled = state !== STATE.IDLE; // can't type while a live voice conversation is connected
 }
 
 async function startDictation() {
   if (dictationState !== DICTATION_STATE.IDLE) return;
-  if (state !== STATE.IDLE) {
-    statusEl.textContent = "先结束当前的语音对话，再用口述输入";
+  if (state !== STATE.IDLE || textState !== TEXT_STATE.IDLE) {
+    statusEl.textContent = "先结束当前的对话，再用口述输入";
     return;
   }
 
@@ -633,13 +822,18 @@ async function startDictation() {
     dictationWs.send(JSON.stringify({
       type: "session.update",
       session: {
-        modalities: ["audio", "text"],
+        // modalities: ["text"], not ["audio", "text"] -- dictation never generates a
+        // reply at all (create_response stays false the whole recording), spoken or
+        // otherwise, and now that "send directly" promotes this connection into the
+        // text session (see promoteDictationConnectionToTextSession) rather than the
+        // voice session, starting it already in text-only mode means that promotion
+        // needs zero modality change, just an instructions patch.
+        modalities: ["text"],
         instructions: "",
-        voice,
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
         // create_response: false is the whole point here -- this session only ever
-        // transcribes, it must never generate a spoken reply.
+        // transcribes, it must never generate a reply.
         turn_detection: { type: "server_vad", threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: 500, create_response: false },
       },
     }));
@@ -675,9 +869,9 @@ async function startDictation() {
 
 // Split in two so finishDictation can stop listening immediately without necessarily
 // closing dictationWs -- the "send directly" path wants to keep that already-open,
-// already-handshaken connection around to hand off to the conversation module instead
-// of closing it and making start() open + handshake a brand new one (see
-// promoteDictationConnection below).
+// already-handshaken connection around to hand off to the text session instead of
+// closing it and making startTextSession() open + handshake a brand new one (see
+// promoteDictationConnectionToTextSession below).
 function teardownDictationCapture() {
   if (dictationProcessorNode) {
     dictationProcessorNode.disconnect();
@@ -717,78 +911,58 @@ function cancelDictation() {
 
 /**
  * Reuses the dictation module's already-open, already-handshaken WebSocket for the
- * "send directly" path instead of closing it and letting start() open + handshake a
- * brand new one. Measured before this existed: opening a fresh connection was ~2.1s
- * of the ~4.9s total send-directly pipeline -- the single biggest chunk (see
- * docs/app-design.md section 3.4). The dictation connection and the live-conversation
- * connection are the same kind of connection (same relay endpoint, same protocol,
- * same session.update shape) -- dictation just runs it with empty instructions and
- * never calls response.create -- so handing it over only needs a lightweight
- * instructions patch (like the existing memory-grounding patch), not a full reconnect.
+ * "send directly" path instead of closing it and letting startTextSession() open +
+ * handshake a brand new one. Measured when this optimization was first built (back
+ * when "direct send" promoted into the voice session, not the text session as it does
+ * now): opening a fresh connection was ~2.1s of the ~4.9s total send-directly
+ * pipeline -- the single biggest chunk (see docs/app-design.md section 3.4).
+ *
+ * Promotes into the TEXT session (docs/app-design.md section 8), not the voice
+ * session -- a better fit than the original design, since the dictation connection
+ * never had live-conversation semantics (mic-hot, spoken replies) to begin with, and
+ * as of the modalities: ["text"] change in startDictation(), it's already configured
+ * exactly like a text session is. That means promoting it needs *zero* modality
+ * change, just the same lightweight instructions patch as before.
  *
  * Only called when dictationWs is still open at this point; callers fall back to the
- * normal start()-based path otherwise (see sendCleanedDictationText).
+ * normal startTextSession()-based path otherwise (see sendCleanedDictationText).
  */
-async function promoteDictationConnection() {
-  setState(STATE.CONNECTING);
+async function promoteDictationConnectionToTextSession() {
+  setTextState(TEXT_STATE.CONNECTING);
 
-  // start() always awaits this before connecting -- dictation never has (it doesn't
-  // need memory grounding to just transcribe), so if this is the user's very first
-  // action in the session, do it now too, in parallel with the reconnect work below,
-  // so handleUserTurn's memory search isn't working off a never-synced local cache.
+  // startTextSession() always awaits this before connecting -- dictation never has
+  // (it doesn't need memory grounding to just transcribe), so if this is the user's
+  // very first action in the session, do it now too, in parallel with the instructions
+  // patch below, so handleUserTurn's memory search isn't working off a never-synced
+  // local cache.
   const pullMemoryPromise = AgentNexusBridge.pullMemory();
 
-  ws = dictationWs;
+  textWs = dictationWs;
   dictationWs = null;
 
-  lastConnErrorMessage = null;
-  ws.onmessage = (event) => {
+  textLastConnErrorMessage = null;
+  textWs.onmessage = (event) => {
     try {
-      handleServerEvent(JSON.parse(event.data));
+      handleTextSessionEvent(JSON.parse(event.data));
     } catch (e) {
       console.error("bad server message", event.data);
     }
   };
-  ws.onerror = () => {
-    lastConnErrorMessage = "连接失败：WebSocket 出错，请检查网络后重试";
-    statusEl.textContent = lastConnErrorMessage;
+  textWs.onerror = () => {
+    textLastConnErrorMessage = "连接失败：WebSocket 出错，请检查网络后重试";
+    statusEl.textContent = textLastConnErrorMessage;
   };
-  ws.onclose = () => {
-    if (state !== STATE.IDLE) stop(lastConnErrorMessage || "连接已断开");
-    lastConnErrorMessage = null;
+  textWs.onclose = () => {
+    if (textState !== TEXT_STATE.IDLE) stopTextSession(textLastConnErrorMessage || "连接已断开");
+    textLastConnErrorMessage = null;
   };
 
-  setupPlayback();
-
-  try {
-    micStream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
-  } catch (e) {
-    statusEl.textContent = `麦克风权限失败：${e.message}（仍可以打字对话）`;
-    micStream = null;
-  }
-  if (micStream) {
-    captureCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const source = captureCtx.createMediaStreamSource(micStream);
-    processorNode = captureCtx.createScriptProcessor(4096, 1, 1);
-    const silentGain = captureCtx.createGain();
-    silentGain.gain.value = 0;
-    processorNode.onaudioprocess = (event) => {
-      const input = event.inputBuffer.getChannelData(0);
-      const downsampled = downsampleTo16k(input, captureCtx.sampleRate);
-      const pcm16 = floatTo16BitPCM(downsampled);
-      sendEvent({ type: "input_audio_buffer.append", audio: int16ToBase64(pcm16) });
-    };
-    source.connect(processorNode);
-    processorNode.connect(silentGain);
-    silentGain.connect(captureCtx.destination);
-  }
-
-  // The dictation session was already configured with the same voice/modalities/
-  // formats/turn_detection as a live conversation -- only `instructions` differs
+  // The dictation session is already configured with modalities: ["text"] and the
+  // same formats/turn_detection a text session uses -- only `instructions` differs
   // (empty vs BASE_INSTRUCTIONS) -- so this one-field patch is all promoting it needs.
-  await updateInstructionsAndWait(BASE_INSTRUCTIONS);
+  await textUpdater.updateInstructionsAndWait(BASE_INSTRUCTIONS);
   await pullMemoryPromise;
-  setState(STATE.LISTENING);
+  setTextState(TEXT_STATE.READY);
 }
 
 /** Like sendTextMessage, but reuses dictationWs (still open post-cleanup) when possible. */
@@ -799,21 +973,21 @@ async function sendCleanedDictationText(text) {
     return;
   }
 
-  if (state === STATE.IDLE && dictationWs && dictationWs.readyState === WebSocket.OPEN) {
-    await promoteDictationConnection();
+  if (textState === TEXT_STATE.IDLE && dictationWs && dictationWs.readyState === WebSocket.OPEN) {
+    await promoteDictationConnectionToTextSession();
   } else {
-    // dictationWs died in between (server dropped it during cleanup) or a live
-    // conversation is somehow already connected -- fall back to the normal path.
+    // dictationWs died in between (server dropped it during cleanup) or a text
+    // session is somehow already connected -- fall back to the normal path.
     closeDictationWs();
-    if (state === STATE.IDLE) await start();
+    if (textState === TEXT_STATE.IDLE) await startTextSession();
   }
 
   addBubble("user", text);
-  sendEvent({
+  sendEventOn(textWs, {
     type: "conversation.item.create",
     item: { type: "message", role: "user", content: [{ type: "input_text", text }] },
   });
-  handleUserTurn(text);
+  handleUserTurn(text, textSession);
 }
 
 /** mode: "edit" fills the text box for review; "send" sends the cleaned text directly. */
