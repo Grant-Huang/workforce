@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>语音对话 Demo</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <span class="title">语音对话 Demo</span>
+      <select id="voiceSelect" class="voiceSelect" aria-label="选择音色" title="选择音色"></select>
+      <span class="status" id="status">未连接</span>
+    </header>
+
+    <main class="chat" id="chat">
+      <div class="empty" id="empty">
+        <p>按下麦克风开始对话，或者直接在下面打字</p>
+        <div class="suggestions" id="suggestions"></div>
+      </div>
+    </main>
+
+    <footer class="controls">
+      <form class="textRow" id="textForm">
+        <input
+          id="textInput"
+          class="textInput"
+          type="text"
+          placeholder="也可以直接打字…"
+          autocomplete="off"
+        />
+        <button type="submit" class="sendBtn" id="sendBtn" aria-label="发送">↑</button>
+      </form>
+
+      <button id="micBtn" class="micBtn" aria-label="开始/结束对话">
+        <svg id="micIcon" viewBox="0 0 24 24" width="30" height="30" fill="none">
+          <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z" fill="currentColor"/>
+          <path d="M19 11a7 7 0 0 1-14 0M12 19v3" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>
+        </svg>
+        <svg id="stopIcon" viewBox="0 0 24 24" width="26" height="26" fill="none" style="display:none">
+          <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>
+        </svg>
+      </button>
+    </footer>
+  </div>
+
+  <script src="/static/memory.js"></script>
+  <script src="/static/agentnexus.js"></script>
+  <script src="/static/saveIntent.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

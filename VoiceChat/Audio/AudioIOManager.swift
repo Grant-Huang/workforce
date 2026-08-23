@@ -1,7 +1,11 @@
 import AVFoundation
 
-/// Captures microphone audio and plays back assistant audio, both as mono
-/// 16-bit PCM at 24kHz — the format the OpenAI Realtime API expects/returns.
+/// Captures microphone audio and plays back assistant audio.
+///
+/// The Realtime API this app talks to (Qwen-Omni-Realtime / Qwen-Audio-Realtime)
+/// uses an *asymmetric* wire format: 16kHz mono PCM16 for audio sent up to the
+/// server, 24kHz mono PCM16 for audio streamed back. (OpenAI's Realtime API uses
+/// 24kHz both ways — if you switch providers, update `inputWireFormat` to match.)
 ///
 /// AVAudioEngine's hardware format is whatever the device gives us (usually
 /// 48kHz float32); `AVAudioConverter` bridges that to/from the wire format so
@@ -11,7 +15,13 @@ final class AudioIOManager {
     private let playerNode = AVAudioPlayerNode()
 
     private var inputConverter: AVAudioConverter?
-    private let wireFormat = AVAudioFormat(
+    private let inputWireFormat = AVAudioFormat(
+        commonFormat: .pcmFormatInt16,
+        sampleRate: 16000,
+        channels: 1,
+        interleaved: true
+    )!
+    private let outputWireFormat = AVAudioFormat(
         commonFormat: .pcmFormatInt16,
         sampleRate: 24000,
         channels: 1,
@@ -27,10 +37,10 @@ final class AudioIOManager {
 
         let input = engine.inputNode
         let hardwareFormat = input.outputFormat(forBus: 0)
-        inputConverter = AVAudioConverter(from: hardwareFormat, to: wireFormat)
+        inputConverter = AVAudioConverter(from: hardwareFormat, to: inputWireFormat)
 
         engine.attach(playerNode)
-        engine.connect(playerNode, to: engine.mainMixerNode, format: wireFormat)
+        engine.connect(playerNode, to: engine.mainMixerNode, format: outputWireFormat)
 
         input.installTap(onBus: 0, bufferSize: 2048, format: hardwareFormat) { [weak self] buffer, _ in
             self?.convertAndEmit(buffer)
@@ -52,7 +62,7 @@ final class AudioIOManager {
     func play(pcm16 data: Data) {
         let frameCount = UInt32(data.count / 2)
         guard frameCount > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: wireFormat, frameCapacity: frameCount) else { return }
+              let buffer = AVAudioPCMBuffer(pcmFormat: outputWireFormat, frameCapacity: frameCount) else { return }
         buffer.frameLength = frameCount
 
         data.withUnsafeBytes { raw in
@@ -72,9 +82,9 @@ final class AudioIOManager {
 
     private func convertAndEmit(_ buffer: AVAudioPCMBuffer) {
         guard let converter = inputConverter else { return }
-        let ratio = wireFormat.sampleRate / buffer.format.sampleRate
+        let ratio = inputWireFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16
-        guard let outBuffer = AVAudioPCMBuffer(pcmFormat: wireFormat, frameCapacity: capacity) else { return }
+        guard let outBuffer = AVAudioPCMBuffer(pcmFormat: inputWireFormat, frameCapacity: capacity) else { return }
 
         var error: NSError?
         var consumed = false
