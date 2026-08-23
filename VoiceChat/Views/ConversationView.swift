@@ -177,10 +177,18 @@ struct ConversationView: View {
     }
 
     private func finishDictation(sendDirectly: Bool) async {
-        guard let cleaned = await dictationViewModel.finish(), !cleaned.isEmpty else { return }
         if sendDirectly {
-            viewModel.sendText(cleaned)
+            // finishForDirectSend (unlike finish()) hands back the dictation
+            // connection still open when there's text to send, so it can be reused
+            // instead of closed-and-reopened — see DictationViewModel.finishForDirectSend
+            // and ConversationViewModel.sendText(_:reusing:). Deliberately not also
+            // guarding on `!cleaned.isEmpty` here: sendText(_:reusing:) already closes
+            // the handed-off connection itself when the text turns out empty, and
+            // bailing out before calling it would leak that connection instead.
+            guard let (cleaned, client) = await dictationViewModel.finishForDirectSend() else { return }
+            viewModel.sendText(cleaned, reusing: client)
         } else {
+            guard let cleaned = await dictationViewModel.finish(), !cleaned.isEmpty else { return }
             textDraft = cleaned
             textFieldFocused = true
         }

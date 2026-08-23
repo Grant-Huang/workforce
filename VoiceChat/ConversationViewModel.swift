@@ -29,7 +29,7 @@ final class ConversationViewModel: ObservableObject {
     @Published private(set) var transcript: [TranscriptLine] = []
 
     private let audio = AudioIOManager()
-    private let client = RealtimeClient()
+    private var client = RealtimeClient()
     let memoryStore = MemoryStore()
     private let agentNexusClient = AgentNexusClient()
     private var assistantLineIndex: Int?
@@ -127,6 +127,69 @@ final class ConversationViewModel: ObservableObject {
         // forever — a real observed failure mode, not hypothetical (see
         // docs/qwen-realtime-voice-setup.md). Cleared by `setState` once we leave
         // .connecting, from either the ready callback above or an error/disconnect.
+        armConnectTimeout()
+
+        // Pull-sync from AgentNexus in the background — short REST call, not on the
+        // conversation's critical path. If it fails or is slow, the conversation just
+        // proceeds with whatever's already in the local cache from last time.
+        pullMemoryInBackground()
+    }
+
+    /// Like `sendText(_:)`, but reuses an already-open, already-handshaken
+    /// `RealtimeClient` (handed off by `DictationViewModel.finishForDirectSend()`)
+    /// instead of calling `start()` to open + handshake a brand new one. The dictation
+    /// connection is the same kind of connection this uses — same relay, same
+    /// protocol, same `session.update` shape — just configured with empty instructions
+    /// and never told to `response.create`, so promoting it only needs one lightweight
+    /// instructions patch, not a full reconnect. Mirrors web-demo/static/app.js's
+    /// promoteDictationConnection / sendCleanedDictationText — see
+    /// docs/app-design.md section 3.4 for the latency measured on the web side (this
+    /// iOS port is unverified, same caveat as the rest of this feature).
+    func sendText(_ text: String, reusing reusableClient: RealtimeClient) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            reusableClient.disconnect()
+            return
+        }
+        guard case .idle = state else {
+            // A live conversation is already connected some other way -- can't reuse a
+            // second connection alongside it. Close the handed-off one and fall back
+            // to the normal path.
+            reusableClient.disconnect()
+            sendText(trimmed)
+            return
+        }
+        guard let apiKey = APIKeyStore.load(), !apiKey.isEmpty else {
+            reusableClient.disconnect()
+            setState(.error("请先在设置里填入 API Key"))
+            return
+        }
+
+        setState(.connecting)
+        client = reusableClient
+        wireCallbacks()
+
+        do {
+            try audio.start()
+        } catch {
+            setState(.error("麦克风启动失败：\(error.localizedDescription)"))
+            return
+        }
+
+        // The dictation session was already configured with the same voice/
+        // turn_detection as a live conversation -- only `instructions` differs (empty
+        // vs systemInstructions) -- so this one-field patch is all promoting it needs.
+        client.updateInstructions(systemInstructions) { [weak self] in
+            guard let self else { return }
+            self.setState(.listening)
+            self.submitUserText(trimmed)
+        }
+
+        armConnectTimeout()
+        pullMemoryInBackground()
+    }
+
+    private func armConnectTimeout() {
         connectTimeoutTask?.cancel()
         connectTimeoutTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: Self.connectTimeoutSeconds * 1_000_000_000)
@@ -135,10 +198,9 @@ final class ConversationViewModel: ObservableObject {
                 self.stop(reason: "连接超时，请重试")
             }
         }
+    }
 
-        // Pull-sync from AgentNexus in the background — short REST call, not on the
-        // conversation's critical path. If it fails or is slow, the conversation just
-        // proceeds with whatever's already in the local cache from last time.
+    private func pullMemoryInBackground() {
         Task { [weak self] in
             guard let self, AgentNexusConfigStore.isConfigured else { return }
             guard let entries = try? await self.agentNexusClient.fetchMemoryEntries() else { return }

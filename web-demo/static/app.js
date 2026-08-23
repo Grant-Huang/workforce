@@ -626,7 +626,12 @@ async function startDictation() {
   silentGain.connect(dictationCaptureCtx.destination);
 }
 
-function teardownDictationAudio() {
+// Split in two so finishDictation can stop listening immediately without necessarily
+// closing dictationWs -- the "send directly" path wants to keep that already-open,
+// already-handshaken connection around to hand off to the conversation module instead
+// of closing it and making start() open + handshake a brand new one (see
+// promoteDictationConnection below).
+function teardownDictationCapture() {
   if (dictationProcessorNode) {
     dictationProcessorNode.disconnect();
     dictationProcessorNode = null;
@@ -639,10 +644,21 @@ function teardownDictationAudio() {
     dictationMicStream.getTracks().forEach((t) => t.stop());
     dictationMicStream = null;
   }
+}
+
+function closeDictationWs() {
   if (dictationWs) {
+    dictationWs.onopen = null;
+    dictationWs.onmessage = null;
+    dictationWs.onerror = null;
     dictationWs.close();
     dictationWs = null;
   }
+}
+
+function teardownDictationAudio() {
+  teardownDictationCapture();
+  closeDictationWs();
 }
 
 function cancelDictation() {
@@ -652,14 +668,120 @@ function cancelDictation() {
   renderDictationUI();
 }
 
+/**
+ * Reuses the dictation module's already-open, already-handshaken WebSocket for the
+ * "send directly" path instead of closing it and letting start() open + handshake a
+ * brand new one. Measured before this existed: opening a fresh connection was ~2.1s
+ * of the ~4.9s total send-directly pipeline -- the single biggest chunk (see
+ * docs/app-design.md section 3.4). The dictation connection and the live-conversation
+ * connection are the same kind of connection (same relay endpoint, same protocol,
+ * same session.update shape) -- dictation just runs it with empty instructions and
+ * never calls response.create -- so handing it over only needs a lightweight
+ * instructions patch (like the existing memory-grounding patch), not a full reconnect.
+ *
+ * Only called when dictationWs is still open at this point; callers fall back to the
+ * normal start()-based path otherwise (see sendCleanedDictationText).
+ */
+async function promoteDictationConnection() {
+  setState(STATE.CONNECTING);
+
+  // start() always awaits this before connecting -- dictation never has (it doesn't
+  // need memory grounding to just transcribe), so if this is the user's very first
+  // action in the session, do it now too, in parallel with the reconnect work below,
+  // so handleUserTurn's memory search isn't working off a never-synced local cache.
+  const pullMemoryPromise = AgentNexusBridge.pullMemory();
+
+  ws = dictationWs;
+  dictationWs = null;
+
+  lastConnErrorMessage = null;
+  ws.onmessage = (event) => {
+    try {
+      handleServerEvent(JSON.parse(event.data));
+    } catch (e) {
+      console.error("bad server message", event.data);
+    }
+  };
+  ws.onerror = () => {
+    lastConnErrorMessage = "连接失败：WebSocket 出错，请检查网络后重试";
+    statusEl.textContent = lastConnErrorMessage;
+  };
+  ws.onclose = () => {
+    if (state !== STATE.IDLE) stop(lastConnErrorMessage || "连接已断开");
+    lastConnErrorMessage = null;
+  };
+
+  playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+  nextPlayTime = 0;
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    statusEl.textContent = `麦克风权限失败：${e.message}（仍可以打字对话）`;
+    micStream = null;
+  }
+  if (micStream) {
+    captureCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = captureCtx.createMediaStreamSource(micStream);
+    processorNode = captureCtx.createScriptProcessor(4096, 1, 1);
+    const silentGain = captureCtx.createGain();
+    silentGain.gain.value = 0;
+    processorNode.onaudioprocess = (event) => {
+      const input = event.inputBuffer.getChannelData(0);
+      const downsampled = downsampleTo16k(input, captureCtx.sampleRate);
+      const pcm16 = floatTo16BitPCM(downsampled);
+      sendEvent({ type: "input_audio_buffer.append", audio: int16ToBase64(pcm16) });
+    };
+    source.connect(processorNode);
+    processorNode.connect(silentGain);
+    silentGain.connect(captureCtx.destination);
+  }
+
+  // The dictation session was already configured with the same voice/modalities/
+  // formats/turn_detection as a live conversation -- only `instructions` differs
+  // (empty vs BASE_INSTRUCTIONS) -- so this one-field patch is all promoting it needs.
+  await updateInstructionsAndWait(BASE_INSTRUCTIONS);
+  await pullMemoryPromise;
+  setState(STATE.LISTENING);
+}
+
+/** Like sendTextMessage, but reuses dictationWs (still open post-cleanup) when possible. */
+async function sendCleanedDictationText(text) {
+  text = text.trim();
+  if (!text) {
+    closeDictationWs();
+    return;
+  }
+
+  if (state === STATE.IDLE && dictationWs && dictationWs.readyState === WebSocket.OPEN) {
+    await promoteDictationConnection();
+  } else {
+    // dictationWs died in between (server dropped it during cleanup) or a live
+    // conversation is somehow already connected -- fall back to the normal path.
+    closeDictationWs();
+    if (state === STATE.IDLE) await start();
+  }
+
+  addBubble("user", text);
+  sendEvent({
+    type: "conversation.item.create",
+    item: { type: "message", role: "user", content: [{ type: "input_text", text }] },
+  });
+  handleUserTurn(text);
+}
+
 /** mode: "edit" fills the text box for review; "send" sends the cleaned text directly. */
 async function finishDictation(mode) {
   if (dictationState !== DICTATION_STATE.RECORDING) return;
-  teardownDictationAudio();
+  // Stop listening right away either way; keep dictationWs open a little longer so
+  // the "send" path below can hand it off to the conversation module instead of
+  // closing it and reconnecting from scratch.
+  teardownDictationCapture();
   const raw = dictationRawText.trim();
   dictationRawText = "";
 
   if (!raw) {
+    closeDictationWs();
     dictationState = DICTATION_STATE.IDLE;
     renderDictationUI();
     return;
@@ -691,12 +813,14 @@ async function finishDictation(mode) {
     if (!res.ok) throw new Error(data.error || "整理失败");
     const cleaned = (data.cleaned || "").trim();
     if (mode === "send") {
-      await sendTextMessage(cleaned);
+      await sendCleanedDictationText(cleaned);
     } else {
+      closeDictationWs(); // no reuse needed for the edit path -- nothing gets sent
       textInput.value = cleaned;
       textInput.focus();
     }
   } catch (e) {
+    closeDictationWs();
     const reason = e.name === "AbortError" ? "响应时间过长（超过 65 秒）" : e.message;
     statusEl.textContent = `口述整理失败：${reason}，请重试`;
   } finally {

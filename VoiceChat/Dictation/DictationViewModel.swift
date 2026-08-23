@@ -24,7 +24,7 @@ final class DictationViewModel: ObservableObject {
     @Published var errorMessage: String?
 
     private let audio = AudioIOManager()
-    private let client = RealtimeClient()
+    private var client = RealtimeClient()
     private var rawTranscript = ""
 
     func start() {
@@ -80,9 +80,8 @@ final class DictationViewModel: ObservableObject {
 
     /// Stops capturing and runs the AI-cleanup step, returning the cleaned text (or
     /// nil if there was nothing to clean, or the cleanup call failed — check
-    /// `errorMessage` in that case). The caller decides what to do with the result:
-    /// populate the text field for editing, or send it directly — this type only
-    /// owns "get from speech to clean text," not message delivery.
+    /// `errorMessage` in that case). Used by the "edit before sending" button, which
+    /// doesn't need the connection afterward — closes it same as `cancel()`.
     func finish() async -> String? {
         guard case .recording = state else { return nil }
         teardown()
@@ -99,6 +98,48 @@ final class DictationViewModel: ObservableObject {
             return try await DictationCleanupClient.cleanup(raw)
         } catch {
             errorMessage = "口述整理失败：\(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// Used by the "send directly" button instead of `finish()`. Stops capturing audio
+    /// but — unlike `finish()` — does NOT close the underlying `RealtimeClient`
+    /// connection when there's text to send: that connection is the same kind of
+    /// Realtime connection `ConversationViewModel` uses (same protocol, same relay),
+    /// just configured to only transcribe (empty instructions, response.create never
+    /// called), so it's handed back to the caller to promote into a live conversation
+    /// instead of being torn down and reconnected from scratch. Mirrors
+    /// web-demo/static/app.js's promoteDictationConnection — see
+    /// docs/app-design.md section 3.4 for the measured savings on the web side (this
+    /// iOS port of the optimization is unverified, same caveat as the rest of this file).
+    ///
+    /// Returns nil (and leaves nothing to reuse — any handed-off connection has already
+    /// been closed) when there was nothing captured or the cleanup call failed; callers
+    /// only need to do something with the connection when this returns non-nil.
+    func finishForDirectSend() async -> (text: String, client: RealtimeClient)? {
+        guard case .recording = state else { return nil }
+        audio.stop() // stop listening; leave the socket itself open for the caller to reuse
+
+        let raw = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        rawTranscript = ""
+
+        let handoffClient = client
+        client = RealtimeClient() // handoffClient now belongs to the caller; this instance needs a fresh, unconnected one for next time
+
+        guard !raw.isEmpty else {
+            handoffClient.disconnect()
+            state = .idle
+            return nil
+        }
+
+        state = .cleaning
+        defer { state = .idle }
+        do {
+            let cleaned = try await DictationCleanupClient.cleanup(raw)
+            return (cleaned, handoffClient)
+        } catch {
+            errorMessage = "口述整理失败：\(error.localizedDescription)"
+            handoffClient.disconnect()
             return nil
         }
     }
