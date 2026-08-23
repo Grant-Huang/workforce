@@ -84,6 +84,8 @@ function setState(next, statusOverride) {
   if (next === STATE.LISTENING) armIdleTimer();
   else clearIdleTimer();
 
+  renderDictationUI(); // keep the dictate button's enabled state in sync (can't run both mics at once)
+
   if (next !== STATE.CONNECTING && connectTimeoutId) {
     clearTimeout(connectTimeoutId);
     connectTimeoutId = null;
@@ -512,6 +514,200 @@ textForm.addEventListener("submit", async (event) => {
   textInput.value = "";
   await sendTextMessage(text);
 });
+
+// ---- voice dictation → text, with AI cleanup (Typeless-style) ----
+//
+// Distinct from the live-conversation mic: this captures speech, transcribes it via
+// the same Realtime protocol (reusing the transcript event the live-conversation path
+// already relies on), but never triggers a spoken reply -- the transcript instead goes
+// through a separate one-shot cleanup call (server-side, see server.py's
+// /api/dictation-cleanup) that turns rambling spoken language into clean written text.
+// See docs/app-design.md section 3 for the full design and what's untested (this
+// sandbox has no real microphone, so this path has never been exercised with real
+// speech -- only the cleanup call itself, with hand-written stand-in transcripts, has
+// been verified).
+const dictateBtn = document.getElementById("dictateBtn");
+const dictationRow = document.getElementById("dictationRow");
+const dictationStatus = document.getElementById("dictationStatus");
+const dictationCancelBtn = document.getElementById("dictationCancelBtn");
+const dictationStopBtn = document.getElementById("dictationStopBtn");
+const dictationSendBtn = document.getElementById("dictationSendBtn");
+
+const DICTATION_STATE = { IDLE: "idle", RECORDING: "recording", CLEANING: "cleaning" };
+let dictationState = DICTATION_STATE.IDLE;
+let dictationWs = null;
+let dictationCaptureCtx = null;
+let dictationProcessorNode = null;
+let dictationMicStream = null;
+let dictationRawText = "";
+
+function renderDictationUI() {
+  const isDictating = dictationState !== DICTATION_STATE.IDLE;
+  textForm.style.display = isDictating ? "none" : "flex";
+  dictationRow.style.display = isDictating ? "flex" : "none";
+  dictationStatus.textContent = dictationState === DICTATION_STATE.CLEANING ? "整理中…" : "正在聆听…";
+  const busy = dictationState !== DICTATION_STATE.IDLE;
+  dictationStopBtn.disabled = dictationState !== DICTATION_STATE.RECORDING;
+  dictationSendBtn.disabled = dictationState !== DICTATION_STATE.RECORDING;
+  dictateBtn.disabled = state !== STATE.IDLE; // can't dictate while a live conversation is connected
+  micBtn.disabled = busy; // can't start a live conversation while dictating
+}
+
+async function startDictation() {
+  if (dictationState !== DICTATION_STATE.IDLE) return;
+  if (state !== STATE.IDLE) {
+    statusEl.textContent = "先结束当前的语音对话，再用口述输入";
+    return;
+  }
+
+  dictationRawText = "";
+  dictationState = DICTATION_STATE.RECORDING;
+  renderDictationUI();
+
+  try {
+    dictationMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    statusEl.textContent = `麦克风权限失败：${e.message}`;
+    dictationState = DICTATION_STATE.IDLE;
+    renderDictationUI();
+    return;
+  }
+
+  dictationCaptureCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const source = dictationCaptureCtx.createMediaStreamSource(dictationMicStream);
+  dictationProcessorNode = dictationCaptureCtx.createScriptProcessor(4096, 1, 1);
+  const silentGain = dictationCaptureCtx.createGain();
+  silentGain.gain.value = 0;
+
+  dictationWs = new WebSocket(`ws://${location.host}/ws`);
+  dictationWs.onopen = () => {
+    if (dictationWs.readyState !== WebSocket.OPEN) return;
+    dictationWs.send(JSON.stringify({
+      type: "session.update",
+      session: {
+        modalities: ["audio", "text"],
+        instructions: "",
+        voice,
+        input_audio_format: "pcm16",
+        output_audio_format: "pcm16",
+        // create_response: false is the whole point here -- this session only ever
+        // transcribes, it must never generate a spoken reply.
+        turn_detection: { type: "server_vad", threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: 500, create_response: false },
+      },
+    }));
+  };
+  dictationWs.onerror = () => {
+    statusEl.textContent = "口述录音连接出错";
+  };
+  dictationWs.onmessage = (event) => {
+    let msg;
+    try {
+      msg = JSON.parse(event.data);
+    } catch (e) {
+      return;
+    }
+    if (msg.type === "conversation.item.input_audio_transcription.completed" && msg.transcript) {
+      dictationRawText += (dictationRawText ? " " : "") + msg.transcript;
+    }
+  };
+
+  dictationProcessorNode.onaudioprocess = (event) => {
+    if (dictationState !== DICTATION_STATE.RECORDING) return;
+    const input = event.inputBuffer.getChannelData(0);
+    const downsampled = downsampleTo16k(input, dictationCaptureCtx.sampleRate);
+    const pcm16 = floatTo16BitPCM(downsampled);
+    if (dictationWs && dictationWs.readyState === WebSocket.OPEN) {
+      dictationWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: int16ToBase64(pcm16) }));
+    }
+  };
+  source.connect(dictationProcessorNode);
+  dictationProcessorNode.connect(silentGain);
+  silentGain.connect(dictationCaptureCtx.destination);
+}
+
+function teardownDictationAudio() {
+  if (dictationProcessorNode) {
+    dictationProcessorNode.disconnect();
+    dictationProcessorNode = null;
+  }
+  if (dictationCaptureCtx) {
+    dictationCaptureCtx.close();
+    dictationCaptureCtx = null;
+  }
+  if (dictationMicStream) {
+    dictationMicStream.getTracks().forEach((t) => t.stop());
+    dictationMicStream = null;
+  }
+  if (dictationWs) {
+    dictationWs.close();
+    dictationWs = null;
+  }
+}
+
+function cancelDictation() {
+  teardownDictationAudio();
+  dictationRawText = "";
+  dictationState = DICTATION_STATE.IDLE;
+  renderDictationUI();
+}
+
+/** mode: "edit" fills the text box for review; "send" sends the cleaned text directly. */
+async function finishDictation(mode) {
+  if (dictationState !== DICTATION_STATE.RECORDING) return;
+  teardownDictationAudio();
+  const raw = dictationRawText.trim();
+  dictationRawText = "";
+
+  if (!raw) {
+    dictationState = DICTATION_STATE.IDLE;
+    renderDictationUI();
+    return;
+  }
+
+  dictationState = DICTATION_STATE.CLEANING;
+  renderDictationUI();
+  try {
+    // Measured latency against this call is highly variable (~17s in some tests,
+    // exceeding even the server's own 60s timeout in another) -- a client-side
+    // abort is a belt-and-suspenders backstop so a hung request can't leave the UI
+    // stuck on "整理中…" forever, same principle as the connection-lifecycle
+    // timeouts elsewhere in this file. Slightly longer than the server's own
+    // timeout so a real server-side 504 has a chance to arrive normally first.
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), 65000);
+    let res;
+    try {
+      res = await fetch("/api/dictation-cleanup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: raw }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(abortTimer);
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "整理失败");
+    const cleaned = (data.cleaned || "").trim();
+    if (mode === "send") {
+      await sendTextMessage(cleaned);
+    } else {
+      textInput.value = cleaned;
+      textInput.focus();
+    }
+  } catch (e) {
+    const reason = e.name === "AbortError" ? "响应时间过长（超过 65 秒）" : e.message;
+    statusEl.textContent = `口述整理失败：${reason}，请重试`;
+  } finally {
+    dictationState = DICTATION_STATE.IDLE;
+    renderDictationUI();
+  }
+}
+
+dictateBtn.addEventListener("click", startDictation);
+dictationCancelBtn.addEventListener("click", cancelDictation);
+dictationStopBtn.addEventListener("click", () => finishDictation("edit"));
+dictationSendBtn.addEventListener("click", () => finishDictation("send"));
 
 // ---- time-based suggestion chips ----
 //

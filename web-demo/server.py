@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 
+import aiohttp
 import websockets
 from aiohttp import web, WSMsgType
 from dotenv import load_dotenv
@@ -53,10 +54,36 @@ VOICE_OPTIONS = [
 ]
 
 
+# The dictate-to-text mode's "AI cleanup" step (docs/app-design.md section 3.2) --
+# a one-shot plain text call, not the Realtime WS. Deliberately a lighter model than
+# the realtime conversation: this task is just cleanup, not open-ended reasoning.
+# Measured latency against this endpoint (2026-08-23), across several calls: as low
+# as ~17s, as high as ~35s, one call exceeded the 30s timeout that was in place at
+# the time. Real variance, not a fluke -- the UI must show an explicit "整理中…"
+# wait state and tolerate a genuinely long wait (both server and client now have
+# their own timeouts, see /api/dictation-cleanup and finishDictation in app.js), not
+# assume any single sample is a safe upper bound.
+QWEN_TEXT_MODEL = os.environ.get("QWEN_TEXT_MODEL", "qwen3.5-flash")
+DICTATION_CLEANUP_PROMPT = (
+    "把用户口述的这段话，整理成一段通顺、结构清晰的书面文字。"
+    "去掉口语里的语气词、重复、停顿词（\"呃\"\"就是\"\"然后\"\"那个\"这些），"
+    "如果用户说话时想到哪说到哪、顺序乱，帮TA理顺逻辑顺序，"
+    "但不要添加原话里没有的信息，不要过度概括丢失细节，保持第一人称语气，"
+    "不要用列表/编号这种书面格式（除非原话本身就是在列举好几件事）。"
+    "直接给出整理后的文字，不要加任何前缀说明。"
+)
+
+
 def upstream_ws_base():
     if QWEN_WORKSPACE_ID:
         return f"wss://{QWEN_WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime"
     return QWEN_WS_BASE
+
+
+def compatible_mode_base():
+    if QWEN_WORKSPACE_ID:
+        return f"https://{QWEN_WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    return "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
 async def index(request):
@@ -116,9 +143,46 @@ async def relay(request):
     return ws_client
 
 
+async def dictation_cleanup(request):
+    """Cleans up a raw voice-dictated transcript into well-organized written text --
+    the AI-cleanup step for the dictate-to-text mode (docs/app-design.md section 3.2).
+    A plain one-shot text call, deliberately separate from the Realtime WS session
+    that captured the transcript in the first place."""
+    if not QWEN_API_KEY:
+        return web.json_response({"error": "QWEN_API_KEY not set in .env"}, status=500)
+
+    body = await request.json()
+    raw_text = (body.get("text") or "").strip()
+    if not raw_text:
+        return web.json_response({"error": "text is required"}, status=400)
+
+    url = f"{compatible_mode_base()}/chat/completions"
+    headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": QWEN_TEXT_MODEL,
+        "messages": [
+            {"role": "system", "content": DICTATION_CLEANUP_PROMPT},
+            {"role": "user", "content": raw_text},
+        ],
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                data = await resp.json()
+                if resp.status != 200:
+                    return web.json_response({"error": f"cleanup call failed: {data}"}, status=502)
+                cleaned = data["choices"][0]["message"]["content"]
+                return web.json_response({"cleaned": cleaned})
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "整理超时（超过60秒），请重试"}, status=504)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=502)
+
+
 app = web.Application()
 app.router.add_get("/", index)
 app.router.add_get("/api/config", config)
+app.router.add_post("/api/dictation-cleanup", dictation_cleanup)
 app.router.add_get("/ws", relay)
 agentnexus_mock.register(app)
 app.router.add_static("/static/", BASE_DIR / "static")

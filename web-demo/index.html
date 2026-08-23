@@ -30,8 +30,18 @@
           placeholder="也可以直接打字…"
           autocomplete="off"
         />
+        <button type="button" class="dictateBtn" id="dictateBtn" aria-label="语音输入转文字">🎙</button>
         <button type="submit" class="sendBtn" id="sendBtn" aria-label="发送">↑</button>
       </form>
+
+      <!-- 口述转文字：录音中显示这一排，替代上面的输入框。X 取消；■ 停止后整理成文字回填到
+           输入框，可编辑再发；↑ 整理完直接发送，不用二次确认。见 docs/app-design.md 第三节。 -->
+      <div class="dictationRow" id="dictationRow" style="display:none">
+        <button type="button" class="dictationCancelBtn" id="dictationCancelBtn" aria-label="取消">✕</button>
+        <span class="dictationStatus" id="dictationStatus">正在聆听…</span>
+        <button type="button" class="dictationStopBtn" id="dictationStopBtn" aria-label="停止，整理后填入输入框">■</button>
+        <button type="button" class="dictationSendBtn" id="dictationSendBtn" aria-label="整理后直接发送">↑</button>
+      </div>
 
       <button id="micBtn" class="micBtn" aria-label="开始/结束对话">
         <svg id="micIcon" viewBox="0 0 24 24" width="30" height="30" fill="none">

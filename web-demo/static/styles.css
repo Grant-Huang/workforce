@@ -171,6 +171,67 @@ body {
   transform: scale(0.95);
 }
 
+.dictateBtn {
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.dictateBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dictationRow {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 8px 6px 6px;
+}
+
+.dictationStatus {
+  flex: 1;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.dictationCancelBtn,
+.dictationStopBtn {
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.dictationSendBtn {
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  font-size: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
 /* Single start/stop toggle button — one control, two visual states. */
 .micBtn {
   width: 72px;
