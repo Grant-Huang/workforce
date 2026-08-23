@@ -15,6 +15,7 @@ const statusEl = document.getElementById("status");
 const micBtn = document.getElementById("micBtn");
 const micIcon = document.getElementById("micIcon");
 const stopIcon = document.getElementById("stopIcon");
+const composerRow = document.getElementById("composerRow");
 const textForm = document.getElementById("textForm");
 const textInput = document.getElementById("textInput");
 
@@ -543,7 +544,7 @@ let dictationRawText = "";
 
 function renderDictationUI() {
   const isDictating = dictationState !== DICTATION_STATE.IDLE;
-  textForm.style.display = isDictating ? "none" : "flex";
+  composerRow.style.display = isDictating ? "none" : "flex";
   dictationRow.style.display = isDictating ? "flex" : "none";
   dictationStatus.textContent = dictationState === DICTATION_STATE.CLEANING ? "整理中…" : "正在聆听…";
   const busy = dictationState !== DICTATION_STATE.IDLE;
