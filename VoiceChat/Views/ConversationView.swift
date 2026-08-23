@@ -10,7 +10,7 @@ struct ConversationView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 24) {
+            VStack(spacing: 20) {
                 transcriptList
                 if viewModel.transcript.isEmpty {
                     suggestionChips
@@ -21,15 +21,18 @@ struct ConversationView: View {
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
-                micButton
+                // ChatGPT-style composer (docs/app-design.md section 1): text pill and
+                // the live-voice-conversation button sit side by side in one row, not
+                // a full-width pill stacked above a separate large mic button.
                 if dictationViewModel.state == .idle {
-                    textInputRow
+                    composerRow
                 } else {
                     dictationRow
                 }
             }
             .padding()
-            .navigationTitle("语音对话")
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
@@ -98,9 +101,16 @@ struct ConversationView: View {
         }
     }
 
-    private var textInputRow: some View {
+    private var composerRow: some View {
+        HStack(spacing: 10) {
+            textInputPill
+            micButton
+        }
+    }
+
+    private var textInputPill: some View {
         HStack(spacing: 8) {
-            TextField("也可以直接打字…", text: $textDraft, axis: .vertical)
+            TextField("询问或者说点什么…", text: $textDraft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .focused($textFieldFocused)
                 .onSubmit(sendTypedText)
@@ -121,6 +131,7 @@ struct ConversationView: View {
         .padding(.vertical, 6)
         .background(Color(.secondarySystemBackground))
         .clipShape(Capsule())
+        .frame(maxWidth: .infinity)
     }
 
     private func sendTypedText() {
@@ -201,14 +212,13 @@ struct ConversationView: View {
             }
         } label: {
             Image(systemName: micIconName)
-                .font(.system(size: 40))
+                .font(.system(size: 20))
                 .foregroundStyle(.white)
-                .frame(width: 88, height: 88)
+                .frame(width: 46, height: 46)
                 .background(micColor)
                 .clipShape(Circle())
         }
         .disabled(dictationViewModel.state != .idle) // can't run both mics at once
-        .padding(.bottom, 24)
     }
 
     private var micIconName: String {
