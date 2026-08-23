@@ -140,7 +140,7 @@ App 里实际上有三种不同的"用户怎么把话传给模型"的方式，�
 
 - **iOS**：本地停播（`AudioIOManager.interruptPlayback`）**同时**发 `response.cancel`（`RealtimeClient.cancelResponse`）——完整的打断。
 - **web**：已修复（2026-08-23）——`speech_started` 分支补上了 `sendEvent({type: "response.cancel"})`，跟 iOS 对齐。用 Playwright 验证过：真实连上 Qwen 后 spy `ws.send`，模拟 `speech_started`，确认 `response.cancel` 真的发出去了。
-- **回声消除（AEC）是打断机制能可靠工作的前提**：不然麦克风会把助手自己的声音当成"用户在打断"，自己打断自己。iOS 靠 `AVAudioSession` 的 `.voiceChat` 模式拿到系统级 AEC；web 依赖浏览器 `getUserMedia` 的默认行为，没有显式声明 `echoCancellation: true`，没有实测过是否可靠。
+- **回声消除（AEC）是打断机制能可靠工作的前提，web 端已确认踩坑并修复（2026-08-23）**：用户真机实测确认——web 端麦克风会把助手自己的声音当成用户输入，不是理论风险，是真实发生的严重 bug。根因大概率是两点：(1) `getUserMedia({ audio: true })` 没有显式声明 `echoCancellation`，虽然多数浏览器默认开，但没显式声明就没法保证；(2) 更关键的是，助手音频之前直接播到 `AudioContext.destination`（原生 Web Audio API 播放），Chromium 的 AEC 依赖"当前正在播放什么"这个参考信号，这个参考信号在 `<audio>`/`<video>` 元素播放时集成得比较可靠，纯 Web Audio API 直连 `.destination` 这条路径不保证被当作参考信号——这是有据可查的已知限制，不是猜测。修复：三处 `getUserMedia` 都显式加了 `echoCancellation`/`noiseSuppression`/`autoGainControl` 约束；播放改成 `AudioBufferSourceNode → MediaStreamAudioDestinationNode → 隐藏的 <audio> 元素`（见 `app.js` 的 `setupPlayback()`）。**验证范围的诚实说明**：这个环境没有真实音箱+麦克风，没法做真正的声学回环测试，Playwright 只能确认代码路径本身没问题（约束参数确实传给了 `getUserMedia`、`<audio>` 元素确实在播放、没有报错、原有功能没回归），修复是不是真的解决了用户实测到的回声，需要用户在真机上重新验证。iOS 走 `AVAudioSession` 的 `.voiceChat` 模式（系统级 AEC，设计上比浏览器软件 AEC 更可靠），用户还没有测试过 iOS 端是否也有同样的问题。
 - **VAD 阈值**（`threshold`/`prefix_padding_ms`/`silence_duration_ms`）已经暴露成 `session.update` 里的参数，但没有针对真人说话调过——这是打断体验灵不灵敏、会不会被呼吸声/背景噪音误伤的真正调节旋钮，等能上真机测试了应该优先调这个。
 
 ### 6.3 过渡语（filler phrases）：延迟掩盖机制的设计方向

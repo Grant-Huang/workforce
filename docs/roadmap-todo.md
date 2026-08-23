@@ -32,6 +32,7 @@
 讨论于 2026-08-23，讨论收敛，完整设计见 `docs/app-design.md` 第六节。
 
 - [x] **web 端打断（barge-in）没有真正取消服务端生成**（2026-08-23 完成）：`app.js` 的 `speech_started` 分支补上了 `sendEvent({type: "response.cancel"})`，并同步重置 `assistantBubbleEl`/`assistantHasDelta`，跟 iOS 的 `onSpeechStarted`（`interruptPlayback` + `cancelResponse`）对齐。用 Playwright 验证过：真实连上 Qwen 后 spy `ws.send`，模拟 `speech_started` 事件，确认 `{"type":"response.cancel"}` 真的被发出去了。
+- [x] **web 端回声自我识别（用户实测发现的严重 bug，2026-08-23 完成）**：用户真机实测确认——web 端对话时，助手自己说的话会被麦克风收音、当成用户输入。这条之前只在 6.2 节写了一句"没实测过是否可靠"的风险提示，没有被排进任何阶段，属于规划疏漏；用户报告后插队立刻修，跳过了原定的阶段顺序。根因见 `docs/app-design.md` 6.2：`getUserMedia` 没显式声明 `echoCancellation`，且助手音频播放路径（原生 `AudioContext.destination`）不保证被 Chromium 的 AEC 当作参考信号。修复：三处 `getUserMedia` 加 `echoCancellation`/`noiseSuppression`/`autoGainControl` 约束；播放改走 `MediaStreamAudioDestinationNode` + 隐藏 `<audio>` 元素（`setupPlayback()`）。**这个环境没有真实音箱麦克风，没法做声学回环测试**，只验证了代码路径本身没问题（约束真的传给了 API、`<audio>` 元素真的在播放、原有对话/打断/口述功能都没回归）——修复是否真的解决问题，需要用户在真机上重新验证。iOS 走系统级 AEC（`.voiceChat` 模式），用户还没测过 iOS 是否也有这个问题。
 - [x] **系统提示词加回复长度三档策略**（2026-08-23 完成）：`BASE_INSTRUCTIONS`（web）/`systemInstructions`（iOS）都改成了查询类（1-3句）/列举类（最多3条左右）/分析类（先给路线图、分段、不中途冒出没预告的点）三档具体指引，分类逻辑留给模型在同一次生成里隐式完成。web 端用 Playwright 验证过 prompt 改动没有破坏正常的文字对话流程；具体分类判断得准不准，需要真实语音场景才能评估，这次只验证了"prompt 改了、协议没坏"。
 - [ ] **过渡语（filler phrases）——暂不阻塞，等接入外部工具调用（比如新闻搜索）时再做**：
   - 起草文案库（几个类别 × 3-5 句，纯文本、不分音色），人工审校定稿后作为静态常量提交进代码库，参照 `VOICE_OPTIONS`/`DICTATION_CLEANUP_PROMPT` 那种"写一次、人工审核、提交源码"的模式

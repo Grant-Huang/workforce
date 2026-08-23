@@ -26,6 +26,8 @@ let ws = null;
 let micStream = null;
 let captureCtx = null;
 let playCtx = null;
+let playDestNode = null; // MediaStreamAudioDestinationNode -- see setupPlayback()
+let playElement = null; // <audio> element playback is routed through, for echo cancellation
 let processorNode = null;
 let nextPlayTime = 0;
 let activeSources = [];
@@ -33,6 +35,13 @@ let assistantBubbleEl = null;
 let assistantHasDelta = false;
 let voice = "Serena";
 let startPromise = null; // in-flight start(), so typed messages can await a session already starting
+
+// Explicit request for the standard WebRTC-family constraints -- echoCancellation
+// defaults to true in most browsers when unset, but that's an implicit default we
+// shouldn't rely on; declaring it explicitly is part of the fix for the self-echo bug
+// (assistant's own speech getting picked up as user input), see setupPlayback()'s
+// comment for the other half of that fix.
+const MIC_CONSTRAINTS = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
 
 // ---- connection lifecycle ----
 //
@@ -161,6 +170,31 @@ function base64ToInt16(base64) {
 }
 
 // ---- playback: schedule streamed 24kHz PCM16 chunks back-to-back for gapless audio ----
+//
+// Playback is deliberately routed through a MediaStreamAudioDestinationNode -> a hidden
+// <audio> element, not connected directly to playCtx.destination. This isn't cosmetic:
+// a real echo bug was reported (assistant's own speech getting picked back up as user
+// input) and the likely root cause is that Chromium's AEC needs a reference signal for
+// "what's currently being played out", and that reference is reliably wired up for
+// <audio>/<video> element playback but is NOT guaranteed for raw Web Audio API output
+// straight to .destination -- a known, documented gap, not a guess. Routing through an
+// <audio> element is the standard workaround. Combined with explicitly requesting
+// echoCancellation on the mic (see start()/startDictation()/promoteDictationConnection()).
+// This couldn't be verified with a real speaker+mic acoustic loop in this sandbox (no
+// real audio hardware here) -- it addresses the documented likely cause, but needs
+// hands-on confirmation on a real device.
+function setupPlayback() {
+  playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+  nextPlayTime = 0;
+  playDestNode = playCtx.createMediaStreamDestination();
+  if (!playElement) {
+    playElement = document.createElement("audio");
+    playElement.autoplay = true;
+    playElement.style.display = "none";
+    document.body.appendChild(playElement);
+  }
+  playElement.srcObject = playDestNode.stream;
+}
 
 function playPCM16Chunk(base64) {
   const int16 = base64ToInt16(base64);
@@ -172,7 +206,7 @@ function playPCM16Chunk(base64) {
 
   const source = playCtx.createBufferSource();
   source.buffer = buffer;
-  source.connect(playCtx.destination);
+  source.connect(playDestNode);
 
   const startAt = Math.max(nextPlayTime, playCtx.currentTime);
   source.start(startAt);
@@ -360,14 +394,13 @@ async function start() {
     await AgentNexusBridge.pullMemory();
 
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
     } catch (e) {
       statusEl.textContent = `麦克风权限失败：${e.message}（仍可以打字对话）`;
       micStream = null;
     }
 
-    playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
-    nextPlayTime = 0;
+    setupPlayback();
 
     if (micStream) {
       captureCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -450,7 +483,7 @@ async function start() {
       // the user can retry instead of being stuck mid-"连接中…".
       if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
       if (captureCtx) { captureCtx.close(); captureCtx = null; }
-      if (playCtx) { playCtx.close(); playCtx = null; }
+      if (playCtx) { playCtx.close(); playCtx = null; playDestNode = null; if (playElement) playElement.srcObject = null; }
       ws = null;
       setState(STATE.IDLE, lastConnErrorMessage || "连接失败，请稍后重试");
     }
@@ -489,6 +522,8 @@ function stop(reason) {
   if (playCtx) {
     playCtx.close();
     playCtx = null;
+    playDestNode = null;
+    if (playElement) playElement.srcObject = null;
   }
   if (micStream) {
     micStream.getTracks().forEach((t) => t.stop());
@@ -576,7 +611,7 @@ async function startDictation() {
   renderDictationUI();
 
   try {
-    dictationMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    dictationMicStream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
   } catch (e) {
     statusEl.textContent = `麦克风权限失败：${e.message}`;
     dictationState = DICTATION_STATE.IDLE;
@@ -721,11 +756,10 @@ async function promoteDictationConnection() {
     lastConnErrorMessage = null;
   };
 
-  playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
-  nextPlayTime = 0;
+  setupPlayback();
 
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micStream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
   } catch (e) {
     statusEl.textContent = `麦克风权限失败：${e.message}（仍可以打字对话）`;
     micStream = null;
