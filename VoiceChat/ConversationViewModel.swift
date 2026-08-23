@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import UIKit
 
 enum ConversationState {
     case idle
@@ -48,6 +49,20 @@ final class ConversationViewModel: ObservableObject {
     /// running session before the message can actually go out, so this is submitted
     /// once the session becomes ready rather than sent immediately.
     private var pendingTextOnReady: String?
+    private var foregroundObserver: NSObjectProtocol?
+
+    init() {
+        // Refresh the local memory cache when the app comes back to the foreground, on
+        // top of the existing pull-on-conversation-start -- covers "memory changed on
+        // another device while this one sat backgrounded" without needing to poll on a
+        // timer (docs/roadmap-todo.md, "拉取时机加一条 app 回到前台时也拉一次"). Mirrors
+        // web-demo/static/app.js's visibilitychange listener.
+        foregroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.pullMemoryInBackground()
+        }
+    }
 
     var systemInstructions = """
         你是一个语音助手，正在和用户实时语音对话。
@@ -56,9 +71,11 @@ final class ConversationViewModel: ObservableObject {
         - 像日常聊天一样自然口语化，不要用书面语（比如不要说"因此""综上所述""值得注意的是"）。
         - 不要用任何视觉格式：不用列表符号、编号、加粗，也不要读网址或代码。
 
-        回答长度：根据问题本身决定，不要机械地限制在一两句话。
-        - 简单的问题、闲聊、确认类的话，几句话说完就行，不用刻意拉长。
-        - 如果用户是让你整理工作内容、待办事项，或者问一个需要讲清楚的技术/工程问题，内容可以详细，但要按口语习惯组织——比如"主要有这么几件事，第一……第二……"这样一段段说，不要用书面的分点列表腔调；内容特别多的时候，可以先说完整体，再问要不要展开某一部分。
+        回答长度：先判断这条问题属于哪一类，再按对应的长度来，不要机械地都说成一两句话或者都展开成一大段：
+        - **查询类**（问日期时间、单一事实、确认性问题）：1-3 句话说完，给答案不给报告，除非用户明确要求展开。
+        - **列举类**（问日程安排、待办事项、多条信息）：一口气最多说 3 条左右，说完问一句"还有几条要不要都说说"，不要一次性倒完一大串，人一次性靠听记不住那么多。
+        - **分析/解释类**（需要讲清楚原因、讲清楚一个技术/工程问题、帮用户理一件复杂的事）：可以说得详细，但先说一句"路线图"（比如"这个我从两方面说"），再按"第一……第二……"这样一段段说，段与段之间自然停顿，给用户留插话的空当；说了几点就是几点，中途不要冒出没预告过的第三点，语音没法让用户"往回听"，说漏了就是说漏了。
+        语音是念给人听的，不是照着文字稿念——同样的内容，念出来比读一遍慢得多，能一句话说清楚的不要拖成三句。
 
         背景信息的使用：
         - 如果背景信息里有跟当前问题相关的内容，用自己的话自然带出来，不要逐字复述，也不要提"背景信息"这个说法本身。

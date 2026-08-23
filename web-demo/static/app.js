@@ -26,6 +26,8 @@ let ws = null;
 let micStream = null;
 let captureCtx = null;
 let playCtx = null;
+let playDestNode = null; // MediaStreamAudioDestinationNode -- see setupPlayback()
+let playElement = null; // <audio> element playback is routed through, for echo cancellation
 let processorNode = null;
 let nextPlayTime = 0;
 let activeSources = [];
@@ -33,6 +35,13 @@ let assistantBubbleEl = null;
 let assistantHasDelta = false;
 let voice = "Serena";
 let startPromise = null; // in-flight start(), so typed messages can await a session already starting
+
+// Explicit request for the standard WebRTC-family constraints -- echoCancellation
+// defaults to true in most browsers when unset, but that's an implicit default we
+// shouldn't rely on; declaring it explicitly is part of the fix for the self-echo bug
+// (assistant's own speech getting picked up as user input), see setupPlayback()'s
+// comment for the other half of that fix.
+const MIC_CONSTRAINTS = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
 
 // ---- connection lifecycle ----
 //
@@ -161,6 +170,31 @@ function base64ToInt16(base64) {
 }
 
 // ---- playback: schedule streamed 24kHz PCM16 chunks back-to-back for gapless audio ----
+//
+// Playback is deliberately routed through a MediaStreamAudioDestinationNode -> a hidden
+// <audio> element, not connected directly to playCtx.destination. This isn't cosmetic:
+// a real echo bug was reported (assistant's own speech getting picked back up as user
+// input) and the likely root cause is that Chromium's AEC needs a reference signal for
+// "what's currently being played out", and that reference is reliably wired up for
+// <audio>/<video> element playback but is NOT guaranteed for raw Web Audio API output
+// straight to .destination -- a known, documented gap, not a guess. Routing through an
+// <audio> element is the standard workaround. Combined with explicitly requesting
+// echoCancellation on the mic (see start()/startDictation()/promoteDictationConnection()).
+// This couldn't be verified with a real speaker+mic acoustic loop in this sandbox (no
+// real audio hardware here) -- it addresses the documented likely cause, but needs
+// hands-on confirmation on a real device.
+function setupPlayback() {
+  playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+  nextPlayTime = 0;
+  playDestNode = playCtx.createMediaStreamDestination();
+  if (!playElement) {
+    playElement = document.createElement("audio");
+    playElement.autoplay = true;
+    playElement.style.display = "none";
+    document.body.appendChild(playElement);
+  }
+  playElement.srcObject = playDestNode.stream;
+}
 
 function playPCM16Chunk(base64) {
   const int16 = base64ToInt16(base64);
@@ -172,7 +206,7 @@ function playPCM16Chunk(base64) {
 
   const source = playCtx.createBufferSource();
   source.buffer = buffer;
-  source.connect(playCtx.destination);
+  source.connect(playDestNode);
 
   const startAt = Math.max(nextPlayTime, playCtx.currentTime);
   source.start(startAt);
@@ -206,9 +240,11 @@ const BASE_INSTRUCTIONS = `你是一个语音助手，正在和用户实时语�
 - 像日常聊天一样自然口语化，不要用书面语（比如不要说"因此""综上所述""值得注意的是"）。
 - 不要用任何视觉格式：不用列表符号、编号、加粗，也不要读网址或代码。
 
-回答长度：根据问题本身决定，不要机械地限制在一两句话。
-- 简单的问题、闲聊、确认类的话，几句话说完就行，不用刻意拉长。
-- 如果用户是让你整理工作内容、待办事项，或者问一个需要讲清楚的技术/工程问题，内容可以详细，但要按口语习惯组织——比如"主要有这么几件事，第一……第二……"这样一段段说，不要用书面的分点列表腔调；内容特别多的时候，可以先说完整体，再问要不要展开某一部分。
+回答长度：先判断这条问题属于哪一类，再按对应的长度来，不要机械地都说成一两句话或者都展开成一大段：
+- **查询类**（问日期时间、单一事实、确认性问题）：1-3 句话说完，给答案不给报告，除非用户明确要求展开。
+- **列举类**（问日程安排、待办事项、多条信息）：一口气最多说 3 条左右，说完问一句"还有几条要不要都说说"，不要一次性倒完一大串，人一次性靠听记不住那么多。
+- **分析/解释类**（需要讲清楚原因、讲清楚一个技术/工程问题、帮用户理一件复杂的事）：可以说得详细，但先说一句"路线图"（比如"这个我从两方面说"），再按"第一……第二……"这样一段段说，段与段之间自然停顿，给用户留插话的空当；说了几点就是几点，中途不要冒出没预告过的第三点，语音没法让用户"往回听"，说漏了就是说漏了。
+语音是念给人听的，不是照着文字稿念——同样的内容，念出来比读一遍慢得多，能一句话说清楚的不要拖成三句。
 
 背景信息的使用：
 - 如果背景信息里有跟当前问题相关的内容，用自己的话自然带出来，不要逐字复述，也不要提"背景信息"这个说法本身。
@@ -318,7 +354,15 @@ function handleServerEvent(json) {
       }
       break;
     case "input_audio_buffer.speech_started":
-      stopPlayback(); // barge-in: Qwen reports interrupt_response support server-side too
+      // Barge-in: Qwen reports interrupt_response support server-side too. Stopping
+      // local playback alone isn't enough -- without response.cancel the server keeps
+      // generating/streaming after the user interrupts, and any response.audio.delta
+      // that arrives after this point would just restart playback. Matches iOS's
+      // onSpeechStarted (interruptPlayback + cancelResponse), which already did both.
+      stopPlayback();
+      sendEvent({ type: "response.cancel" });
+      assistantBubbleEl = null;
+      assistantHasDelta = false;
       setState(STATE.LISTENING);
       break;
     case "response.done":
@@ -350,14 +394,13 @@ async function start() {
     await AgentNexusBridge.pullMemory();
 
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
     } catch (e) {
       statusEl.textContent = `麦克风权限失败：${e.message}（仍可以打字对话）`;
       micStream = null;
     }
 
-    playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
-    nextPlayTime = 0;
+    setupPlayback();
 
     if (micStream) {
       captureCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -440,7 +483,7 @@ async function start() {
       // the user can retry instead of being stuck mid-"连接中…".
       if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
       if (captureCtx) { captureCtx.close(); captureCtx = null; }
-      if (playCtx) { playCtx.close(); playCtx = null; }
+      if (playCtx) { playCtx.close(); playCtx = null; playDestNode = null; if (playElement) playElement.srcObject = null; }
       ws = null;
       setState(STATE.IDLE, lastConnErrorMessage || "连接失败，请稍后重试");
     }
@@ -479,6 +522,8 @@ function stop(reason) {
   if (playCtx) {
     playCtx.close();
     playCtx = null;
+    playDestNode = null;
+    if (playElement) playElement.srcObject = null;
   }
   if (micStream) {
     micStream.getTracks().forEach((t) => t.stop());
@@ -566,7 +611,7 @@ async function startDictation() {
   renderDictationUI();
 
   try {
-    dictationMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    dictationMicStream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
   } catch (e) {
     statusEl.textContent = `麦克风权限失败：${e.message}`;
     dictationState = DICTATION_STATE.IDLE;
@@ -711,11 +756,10 @@ async function promoteDictationConnection() {
     lastConnErrorMessage = null;
   };
 
-  playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
-  nextPlayTime = 0;
+  setupPlayback();
 
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micStream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
   } catch (e) {
     statusEl.textContent = `麦克风权限失败：${e.message}（仍可以打字对话）`;
     micStream = null;
@@ -898,3 +942,11 @@ voiceSelect.addEventListener("change", () => {
 
 renderSuggestions();
 setState(STATE.IDLE);
+
+// Refresh the local memory cache when the tab regains focus, on top of the existing
+// pull-on-conversation-start -- covers "memory changed on another device/tab while this
+// one sat idle in the background" without needing to poll on a timer (docs/roadmap-todo.md,
+// "拉取时机加一条 app 回到前台时也拉一次").
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") AgentNexusBridge.pullMemory();
+});
