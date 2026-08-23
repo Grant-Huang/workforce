@@ -66,6 +66,14 @@ final class ConversationViewModel: ObservableObject {
         - 常识性、闲聊性的问题正常回答，不用刻意强调"没有记录"。
         """
 
+    /// Convenience for View-side `.disabled(...)` bindings (e.g. the dictate button
+    /// can't be used while a live conversation is connected) — matching `if case`
+    /// checks inline at call sites gets noisy fast.
+    var isIdle: Bool {
+        if case .idle = state { return true }
+        return false
+    }
+
     /// 0-1 time-based suggestions shown in the empty state (before any turns) —
     /// restrained on purpose: no auto-speak, no auto-connect, just a tappable prompt.
     /// Mirrors web-demo/static/app.js's `getTimeSuggestions`.

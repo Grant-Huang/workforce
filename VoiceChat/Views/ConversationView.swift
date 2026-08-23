@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ConversationView: View {
     @StateObject private var viewModel = ConversationViewModel()
+    @StateObject private var dictationViewModel = DictationViewModel()
     @State private var showingSettings = false
     @State private var showingMemory = false
     @State private var textDraft = ""
@@ -15,8 +16,17 @@ struct ConversationView: View {
                     suggestionChips
                 }
                 statusLabel
+                if let dictationError = dictationViewModel.errorMessage, dictationViewModel.state == .idle {
+                    Text(dictationError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
                 micButton
-                textInputRow
+                if dictationViewModel.state == .idle {
+                    textInputRow
+                } else {
+                    dictationRow
+                }
             }
             .padding()
             .navigationTitle("语音对话")
@@ -94,6 +104,13 @@ struct ConversationView: View {
                 .textFieldStyle(.plain)
                 .focused($textFieldFocused)
                 .onSubmit(sendTypedText)
+            Button {
+                dictationViewModel.errorMessage = nil
+                dictationViewModel.start()
+            } label: {
+                Image(systemName: "mic")
+            }
+            .disabled(!viewModel.isIdle) // can't dictate while a live conversation is connected
             Button(action: sendTypedText) {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 28))
@@ -111,6 +128,51 @@ struct ConversationView: View {
         textDraft = ""
         textFieldFocused = false
         viewModel.sendText(text)
+    }
+
+    /// Voice-dictate-to-text (docs/app-design.md section 3), replacing textInputRow
+    /// while recording/cleaning. X cancels outright; ■ stops and fills the text field
+    /// for review before sending; ↑ stops, cleans up, and sends directly — the two
+    /// button semantics the user specified explicitly, not two states of one button.
+    private var dictationRow: some View {
+        HStack(spacing: 10) {
+            Button {
+                dictationViewModel.cancel()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            Text(dictationViewModel.state == .cleaning ? "整理中…" : "正在聆听…")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+            Button {
+                Task { await finishDictation(sendDirectly: false) }
+            } label: {
+                Image(systemName: "stop.circle.fill")
+            }
+            .disabled(dictationViewModel.state != .recording)
+            Button {
+                Task { await finishDictation(sendDirectly: true) }
+            } label: {
+                Image(systemName: "arrow.up.circle.fill")
+            }
+            .disabled(dictationViewModel.state != .recording)
+        }
+        .font(.system(size: 24))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color(.secondarySystemBackground))
+        .clipShape(Capsule())
+    }
+
+    private func finishDictation(sendDirectly: Bool) async {
+        guard let cleaned = await dictationViewModel.finish(), !cleaned.isEmpty else { return }
+        if sendDirectly {
+            viewModel.sendText(cleaned)
+        } else {
+            textDraft = cleaned
+            textFieldFocused = true
+        }
     }
 
     private var statusLabel: some View {
@@ -145,6 +207,7 @@ struct ConversationView: View {
                 .background(micColor)
                 .clipShape(Circle())
         }
+        .disabled(dictationViewModel.state != .idle) // can't run both mics at once
         .padding(.bottom, 24)
     }
 

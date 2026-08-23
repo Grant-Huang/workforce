@@ -89,7 +89,7 @@ App 里实际上有三种不同的"用户怎么把话传给模型"的方式，�
 
 - [ ] **真实语音识别**——这个环境没有真实麦克风，"用户说话 → 转写成文字"这一段用的是伪造音频设备，没法产生真实的语音触发 VAD。转写事件的机制（复用 `conversation.item.input_audio_transcription.completed`）在协议层面跟现有的实时对话模式共用同一套代码，理论上没问题，但没有用真实语音跑过。
 - [ ] 口述过程中的打断/取消行为在真实设备上的表现（网页 demo 上代码逻辑是对的，X 按钮会正确释放音频资源，但同样受限于没有真实麦克风，没法端到端验证"说到一半改主意"这种真实场景）。
-- [ ] iOS 版本——这次的实现只做了网页 demo，iOS 端还没开始移植。
+- [x] **iOS 版本已移植**（2026-08-23）：`VoiceChat/Dictation/DictationViewModel.swift`（独立的、跟 `ConversationViewModel` 分开的轻量状态机，避免两套逻辑纠缠）+ `DictationCleanupClient.swift`（对应网页版 `/api/dictation-cleanup`，同样的模型和 prompt）+ `ConversationView.swift` 里的三按钮录音行。跟网页版一样，**这次的移植本身没有编译验证过**（这个环境没有 Swift 工具链，只做了手工括号配对检查），网页版已经验证过的部分（清理调用效果、两个按钮的完整链路、延迟特征）在设计上是一致的，但 Swift 代码本身是否真的能跑起来，要等第一次 Xcode 编译才知道。
 
 ## 四、现有功能盘点（避免重复设计）
 
