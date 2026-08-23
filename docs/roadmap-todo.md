@@ -20,6 +20,10 @@
 
 ## 会话（插话机制 / 回复长度 / 过渡语）
 
-讨论于 2026-08-23。过渡语设计（预先设计库 vs 现场生成）、回复长度分档策略（查询类/列举类/分析类）还在讨论中，收敛后再补充到这里。目前只有一条是明确的、不需要再讨论的 bug：
+讨论于 2026-08-23，讨论收敛，完整设计见 `docs/app-design.md` 第六节。
 
-- [ ] **web 端打断（barge-in）没有真正取消服务端生成**：`app.js` 收到 `input_audio_buffer.speech_started` 时只调了 `stopPlayback()`（本地停止播放），没有发 `response.cancel`——服务端不知道自己被打断了，会继续生成/推流，如果打断之后还有 `response.audio.delta` 事续到达，会重新触发播放。iOS 这边（`ConversationViewModel`）是对的，`interruptPlayback()` 之外还调用了 `client.cancelResponse()`。web 端要补上对应调用（`sendEvent({type: "response.cancel"})`），跟 iOS 对齐。
+- [ ] **web 端打断（barge-in）没有真正取消服务端生成**：`app.js` 收到 `input_audio_buffer.speech_started` 时只调了 `stopPlayback()`（本地停止播放），没有发 `response.cancel`——服务端不知道自己被打断了，会继续生成/推流，如果打断之后还有 `response.audio.delta` 事件到达，会重新触发播放。iOS 这边（`ConversationViewModel`）是对的，`interruptPlayback()` 之外还调用了 `client.cancelResponse()`。web 端要补上对应调用（`sendEvent({type: "response.cancel"})`），跟 iOS 对齐。
+- [ ] **系统提示词加回复长度三档策略**：把 `BASE_INSTRUCTIONS`（web）/`systemInstructions`（iOS）里笼统的"长度自己判断"，细化成查询类（1-3句）/列举类（最多3条左右）/分析类（分段、先给路线图）三档具体指引，两处系统提示词都要改。分类逻辑交给同一次生成隐式完成，不要拆成"先分类再回答"的两次调用。
+- [ ] **过渡语（filler phrases）——暂不阻塞，等接入外部工具调用（比如新闻搜索）时再做**：
+  - 起草文案库（几个类别 × 3-5 句，纯文本、不分音色），人工审校定稿后作为静态常量提交进代码库，参照 `VOICE_OPTIONS`/`DICTATION_CLEANUP_PROMPT` 那种"写一次、人工审核、提交源码"的模式
+  - 先验证 Realtime 协议在"工具调用进行中"能不能先说一句预设文本、再等结果、再继续——这是"复用当前连接念过渡语，不额外生成音频资源"这个方案能不能成立的前提，目前完全没测过
