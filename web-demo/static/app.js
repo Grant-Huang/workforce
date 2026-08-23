@@ -423,7 +423,8 @@ async function start() {
 
     lastConnErrorMessage = null;
     await new Promise((resolveOpen, rejectOpen) => {
-      ws = new WebSocket(`ws://${location.host}/ws`);
+      const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(`${wsProto}//${location.host}/ws`);
       ws.onopen = resolveOpen;
       ws.onerror = () => {
         lastConnErrorMessage = "连接失败：WebSocket 出错，请检查网络后重试";
@@ -625,7 +626,8 @@ async function startDictation() {
   const silentGain = dictationCaptureCtx.createGain();
   silentGain.gain.value = 0;
 
-  dictationWs = new WebSocket(`ws://${location.host}/ws`);
+  const dictationWsProto = location.protocol === "https:" ? "wss:" : "ws:";
+  dictationWs = new WebSocket(`${dictationWsProto}//${location.host}/ws`);
   dictationWs.onopen = () => {
     if (dictationWs.readyState !== WebSocket.OPEN) return;
     dictationWs.send(JSON.stringify({
