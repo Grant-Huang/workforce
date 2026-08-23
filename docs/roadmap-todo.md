@@ -8,7 +8,7 @@
 
 现状：`VoiceChat/Memory/MemoryStore.swift` / `web-demo/static/memory.js` 是一个扁平数组，没有来源字段（iOS 完全没有，web 端只有非正式的 `meta.source`），合并逻辑是"存在就跳过"，没有上限、没有同步状态追踪。
 
-- [ ] **给 `MemoryEntry` 加正式的来源字段**：`source`（来源系统，如 `"agentnexus"`/`"local"`）+ `sourceId`（该系统内的原生 ID），取代现在 web 端"字符串拼接 `agentnexus:${entry_id}` 当 id 用"的非正式做法，iOS 端从零补上（现在完全没有）。这是下面几条的前提。
+- [x] **给 `MemoryEntry` 加正式的来源字段**（2026-08-23 完成）：`source`（`"local"`/`"agentnexus"`/`"unknown"`，见 `MemorySource`）+ `sourceId`。iOS/web 都加了，web 端不再用 `agentnexus:${entry_id}` 字符串拼接当唯一来源（保留字符串拼接作为 `id`，因为 Phase 2 之前 `merge` 的去重逻辑还是按 `id` 走，改 `id` 会破坏现有去重；`sourceId` 是新加的正式字段）。**旧数据兼容性是这次的重点**——两端都不是简单加字段，而是显式处理"旧的 `memory.json`/localStorage 里的记录没有 `source` 字段"这个情况：iOS 用自定义 `init(from:)` + `decodeIfPresent` 兜底（否则旧数据会因为解码失败被 `MemoryStore.load()` 的 `try?` 静默清空，这是真实的数据丢失风险，不是理论问题）；web 端 `load()` 做同样的兜底。两边都不把旧数据默认成 `"local"`（那意味着"还没同步"，但旧数据说不定早就同步过，只是没记录），而是标成 `"unknown"`，诚实反映"不知道"而不是瞎猜。**验证**：web 端用 Playwright 测过三种场景——旧格式数据 reload 后不丢失且标成 unknown、新增的本地对话默认 `source: "local"`、从 AgentNexus 拉取的记忆正确带上 `source: "agentnexus"` + 真实的 `sourceId`；另外重新跑了一遍已有的对话/打断/口述回归测试 + 一次记忆检索到问答的端到端验证（确认取到的记忆真的被塞进了发给模型的 `instructions` 里），确认这次改动没有破坏原有功能。iOS 端只做了源码改动，未编译验证。这是后面几条的前提。
 - [ ] **合并逻辑从"存在就跳过"改成按 `(source, sourceId)` 做 upsert**：现在的 bug 是——如果在智枢那边编辑了一条已经拉过的记忆，本地永远不会更新，因为 `entry_id` 已存在就直接跳过了。改成比较 `updated_at`，更新的才覆盖。
 - [ ] **本机原始对话按来源系统整体替换，而不是永久累加 merge**：每次从某个来源拉取，把"属于这个来源的本地记录"整体替换成最新集合，而不是一条条判断"是不是被删了"——本地缓存的定位本来就是"可丢弃、可重建"的镜像，全量替换更简单也更不容易留下幽灵数据。注意本机产生、还没同步出去的记录（下一条）不能被这个替换逻辑误伤。
 - [ ] **本机产生的记录也要标来源**：`source: "local"`（未同步）→ 推送确认成功后"过户"成 `source: "agentnexus", sourceId: <服务端分配的id>`。

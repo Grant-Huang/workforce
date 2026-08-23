@@ -228,10 +228,10 @@ final class ConversationViewModel: ObservableObject {
             guard let self, AgentNexusConfigStore.isConfigured else { return }
             guard let entries = try? await self.agentNexusClient.fetchMemoryEntries() else { return }
             let formatter = ISO8601DateFormatter()
-            let mapped = entries.map { entry -> (text: String, timestamp: Date) in
+            let mapped = entries.map { entry -> (text: String, timestamp: Date, sourceId: String) in
                 let text = entry.title.map { "\($0)：\(entry.content)" } ?? entry.content
                 let date = entry.updatedAt.flatMap { formatter.date(from: $0) } ?? Date()
-                return (text, date)
+                return (text, date, entry.entryId)
             }
             self.memoryStore.merge(remoteEntries: mapped)
         }

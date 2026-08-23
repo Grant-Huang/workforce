@@ -32,10 +32,16 @@ const AgentNexusBridge = (() => {
       const remoteEntries = await res.json();
       LocalMemory.merge(
         remoteEntries.map((e) => ({
+          // `id` stays the string-concat form for now -- LocalMemory.merge's dedup is
+          // still keyed on `id` in this phase (see its doc comment), so changing this
+          // would break dedup. `sourceId` is the new, formal field Phase 2's upsert
+          // logic will actually key on; both point at the same underlying entry_id
+          // deliberately, this isn't two different ids.
           id: `agentnexus:${e.entry_id}`,
           text: e.title ? `${e.title}：${e.content}` : e.content,
           timestamp: e.updated_at ? Date.parse(e.updated_at) : Date.now(),
           source: "agentnexus",
+          sourceId: e.entry_id,
           layer: e.layer,
         }))
       );
