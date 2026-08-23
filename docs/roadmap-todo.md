@@ -14,7 +14,7 @@
 - [ ] **本机产生的记录也要标来源**：`source: "local"`（未同步）→ 推送确认成功后"过户"成 `source: "agentnexus", sourceId: <服务端分配的id>`。
 - [ ] **推送加同步状态追踪 + 失败重试**：现在 `pushMessage`/推送是纯 fire-and-forget，失败了没有任何记录、也不会重试，那句话就永远不会出现在智枢里，本地却毫无察觉。要加"是否已确认同步"的状态，失败了在下次有网络时重试。
 - [ ] **原始对话记录加滚动窗口裁剪**（具体数字后续再定，方向是"最近 N 条或最近 M 天，取较大者"）：本地缓存不该背"永久保留全部历史"的包袱，这是智枢 `history` 层该做的事；AgentNexus 拉回来的结构化记忆（ANCHOR/DECISIONS/PROGRESS）量小价值高，不用同一套裁剪策略。
-- [ ] **拉取时机加一条"app 回到前台时也拉一次"**，覆盖"在另一台设备上改了记忆，这台设备一直没开新对话"的场景——不需要上定时轮询，对话开始时拉取 + 前台唤醒时拉取已经够用。
+- [x] **拉取时机加一条"app 回到前台时也拉一次"**（2026-08-23 完成）——web 端监听 `visibilitychange`，iOS 端监听 `UIApplication.didBecomeActiveNotification`，触发时都调 `pullMemoryInBackground`/`AgentNexusBridge.pullMemory()`。web 端用 Playwright 验证过（spy 替换 `AgentNexusBridge.pullMemory`，模拟 `visibilitychange`→visible，确认被调用）；iOS 端只做了改动，未编译验证。
 
 不建议做的方向（讨论中明确排除）：本地不应该自建向量检索/自己的分层整理逻辑——那是智枢该做的事，本地重复做一遍会变成两份互相打架的真相源。
 
@@ -31,8 +31,8 @@
 
 讨论于 2026-08-23，讨论收敛，完整设计见 `docs/app-design.md` 第六节。
 
-- [ ] **web 端打断（barge-in）没有真正取消服务端生成**：`app.js` 收到 `input_audio_buffer.speech_started` 时只调了 `stopPlayback()`（本地停止播放），没有发 `response.cancel`——服务端不知道自己被打断了，会继续生成/推流，如果打断之后还有 `response.audio.delta` 事件到达，会重新触发播放。iOS 这边（`ConversationViewModel`）是对的，`interruptPlayback()` 之外还调用了 `client.cancelResponse()`。web 端要补上对应调用（`sendEvent({type: "response.cancel"})`），跟 iOS 对齐。
-- [ ] **系统提示词加回复长度三档策略**：把 `BASE_INSTRUCTIONS`（web）/`systemInstructions`（iOS）里笼统的"长度自己判断"，细化成查询类（1-3句）/列举类（最多3条左右）/分析类（分段、先给路线图）三档具体指引，两处系统提示词都要改。分类逻辑交给同一次生成隐式完成，不要拆成"先分类再回答"的两次调用。
+- [x] **web 端打断（barge-in）没有真正取消服务端生成**（2026-08-23 完成）：`app.js` 的 `speech_started` 分支补上了 `sendEvent({type: "response.cancel"})`，并同步重置 `assistantBubbleEl`/`assistantHasDelta`，跟 iOS 的 `onSpeechStarted`（`interruptPlayback` + `cancelResponse`）对齐。用 Playwright 验证过：真实连上 Qwen 后 spy `ws.send`，模拟 `speech_started` 事件，确认 `{"type":"response.cancel"}` 真的被发出去了。
+- [x] **系统提示词加回复长度三档策略**（2026-08-23 完成）：`BASE_INSTRUCTIONS`（web）/`systemInstructions`（iOS）都改成了查询类（1-3句）/列举类（最多3条左右）/分析类（先给路线图、分段、不中途冒出没预告的点）三档具体指引，分类逻辑留给模型在同一次生成里隐式完成。web 端用 Playwright 验证过 prompt 改动没有破坏正常的文字对话流程；具体分类判断得准不准，需要真实语音场景才能评估，这次只验证了"prompt 改了、协议没坏"。
 - [ ] **过渡语（filler phrases）——暂不阻塞，等接入外部工具调用（比如新闻搜索）时再做**：
   - 起草文案库（几个类别 × 3-5 句，纯文本、不分音色），人工审校定稿后作为静态常量提交进代码库，参照 `VOICE_OPTIONS`/`DICTATION_CLEANUP_PROMPT` 那种"写一次、人工审核、提交源码"的模式
   - 先验证 Realtime 协议在"工具调用进行中"能不能先说一句预设文本、再等结果、再继续——这是"复用当前连接念过渡语，不额外生成音频资源"这个方案能不能成立的前提，目前完全没测过

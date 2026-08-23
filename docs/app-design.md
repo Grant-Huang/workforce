@@ -132,14 +132,14 @@ App 里实际上有三种不同的"用户怎么把话传给模型"的方式，�
   - **分析/解释类**：允许长，但按自然的"段落边界"切开（"第一……第二……"这种口语化分段），给用户创造插话的自然缝隙，不是不停顿的独白
 - **一致性技巧**：长回答先给"路线图"句子（"这个问题我从两个角度说：一个是……，另一个是……"）；说了几点就是几点，不能中途冒出没预告的内容——语音场景比文字场景对这条要求更严格，因为听众没法"往回听"检查逻辑是不是乱了。
 - **分类机制**：交给提示词/大模型隐式完成分类，跟"按对应策略生成回复"放在同一次生成里，**不做成"先分类一次调用、再回答一次调用"的两段式架构**——这个 App 的延迟预算不允许平白多一次网络往返。正则/规则（比如 `SaveIntent` 那样的强信号场景）不适合这里，"这条问题该长答还是短答"本质上依赖语义理解，规则会比文本场景更脆弱（语音输入是 ASR 转写出来的，用词更随意、可能有识别错误）。
-- **待做**：把 `BASE_INSTRUCTIONS`/`systemInstructions` 里笼统的"长度自己判断"细化成上面三档的具体指引（网页、iOS 两处系统提示词都要改）。
+- **已完成**（2026-08-23）：`BASE_INSTRUCTIONS`/`systemInstructions` 都已按上面三档改写。web 端用 Playwright 验证过改完之后正常文字对话流程没有被破坏；三档分类本身判断得准不准，需要真实语音场景才能评估，这次只确认了"prompt 改了、协议没坏"。
 
 ### 6.2 插话机制：现状与已知缺口
 
 两端都用 Realtime 协议的 `input_audio_buffer.speech_started` 事件触发打断，但完整度不一样：
 
 - **iOS**：本地停播（`AudioIOManager.interruptPlayback`）**同时**发 `response.cancel`（`RealtimeClient.cancelResponse`）——完整的打断。
-- **web**：目前只调了 `stopPlayback()`，没有发 `response.cancel`——服务端不知道自己被打断了，会继续生成/推流，属于已知 bug（见 `docs/roadmap-todo.md`）。
+- **web**：已修复（2026-08-23）——`speech_started` 分支补上了 `sendEvent({type: "response.cancel"})`，跟 iOS 对齐。用 Playwright 验证过：真实连上 Qwen 后 spy `ws.send`，模拟 `speech_started`，确认 `response.cancel` 真的发出去了。
 - **回声消除（AEC）是打断机制能可靠工作的前提**：不然麦克风会把助手自己的声音当成"用户在打断"，自己打断自己。iOS 靠 `AVAudioSession` 的 `.voiceChat` 模式拿到系统级 AEC；web 依赖浏览器 `getUserMedia` 的默认行为，没有显式声明 `echoCancellation: true`，没有实测过是否可靠。
 - **VAD 阈值**（`threshold`/`prefix_padding_ms`/`silence_duration_ms`）已经暴露成 `session.update` 里的参数，但没有针对真人说话调过——这是打断体验灵不灵敏、会不会被呼吸声/背景噪音误伤的真正调节旋钮，等能上真机测试了应该优先调这个。
 
