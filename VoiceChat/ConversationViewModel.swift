@@ -68,10 +68,16 @@ final class ConversationViewModel: ObservableObject {
 
     /// Convenience for View-side `.disabled(...)` bindings (e.g. the dictate button
     /// can't be used while a live conversation is connected) — matching `if case`
-    /// checks inline at call sites gets noisy fast.
+    /// checks inline at call sites gets noisy fast. `.error` counts as "no active
+    /// connection" here too, same as `.idle`: otherwise a conversation error would
+    /// permanently lock dictation out until the conversation somehow got back to
+    /// `.idle` on its own, even though the live-conversation mic button itself already
+    /// treats `.error` as retryable (see `micButton`'s `case .idle, .error: start()`).
     var isIdle: Bool {
-        if case .idle = state { return true }
-        return false
+        switch state {
+        case .idle, .error: return true
+        default: return false
+        }
     }
 
     /// 0-1 time-based suggestions shown in the empty state (before any turns) —

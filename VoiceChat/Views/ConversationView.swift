@@ -11,9 +11,10 @@ struct ConversationView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
-                transcriptList
                 if viewModel.transcript.isEmpty {
-                    suggestionChips
+                    emptyStateView
+                } else {
+                    transcriptList
                 }
                 statusLabel
                 if let dictationError = dictationViewModel.errorMessage, dictationViewModel.state == .idle {
@@ -75,15 +76,39 @@ struct ConversationView: View {
         }
     }
 
+    // ChatGPT's accent teal (docs/app-design.md section 1) -- matches web-demo's
+    // --user-bubble CSS variable exactly, so the two platforms read as the same product.
+    private static let chatGPTGreen = Color(red: 16.0 / 255, green: 163.0 / 255, blue: 127.0 / 255)
+
     private func bubble(for line: TranscriptLine) -> some View {
         HStack {
             if line.speaker == .assistant { Spacer(minLength: 40) }
             Text(line.text)
-                .padding(10)
-                .background(line.speaker == .user ? Color.blue.opacity(0.15) : Color.gray.opacity(0.15))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .foregroundStyle(line.speaker == .user ? .white : .primary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(line.speaker == .user ? Self.chatGPTGreen : Color(.systemGray6))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
             if line.speaker == .user { Spacer(minLength: 40) }
         }
+    }
+
+    /// Mirrors web-demo's `.empty` state (docs/app-design.md section 1: "空状态的文案
+    /// 往下挪、留白加大") -- guidance text + the same 0-1 time-based suggestion chips,
+    /// pushed down with extra top space instead of sitting flush at the top of the
+    /// empty chat area. `transcriptList`'s ScrollView greedily fills the VStack's
+    /// remaining height even with nothing in it, so this needs the same
+    /// maxHeight: .infinity to keep the composer docked at the bottom either way.
+    private var emptyStateView: some View {
+        VStack(spacing: 20) {
+            Text("按下麦克风开始对话，或者直接在下面打字")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            suggestionChips
+        }
+        .padding(.top, 100)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     /// Restrained on-open prompt (see ConversationViewModel.suggestionChips): 0-1
