@@ -4,13 +4,19 @@ struct ConversationView: View {
     @StateObject private var viewModel = ConversationViewModel()
     @State private var showingSettings = false
     @State private var showingMemory = false
+    @State private var textDraft = ""
+    @FocusState private var textFieldFocused: Bool
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 24) {
                 transcriptList
+                if viewModel.transcript.isEmpty {
+                    suggestionChips
+                }
                 statusLabel
                 micButton
+                textInputRow
             }
             .padding()
             .navigationTitle("语音对话")
@@ -65,6 +71,46 @@ struct ConversationView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12))
             if line.speaker == .user { Spacer(minLength: 40) }
         }
+    }
+
+    /// Restrained on-open prompt (see ConversationViewModel.suggestionChips): 0-1
+    /// tappable suggestions, no auto-speak/auto-connect. Ported from the web demo.
+    private var suggestionChips: some View {
+        ForEach(viewModel.suggestionChips) { chip in
+            Button(chip.label) {
+                viewModel.sendText(chip.query)
+            }
+            .font(.footnote)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Color(.secondarySystemBackground))
+            .clipShape(Capsule())
+        }
+    }
+
+    private var textInputRow: some View {
+        HStack(spacing: 8) {
+            TextField("也可以直接打字…", text: $textDraft, axis: .vertical)
+                .textFieldStyle(.plain)
+                .focused($textFieldFocused)
+                .onSubmit(sendTypedText)
+            Button(action: sendTypedText) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 28))
+            }
+            .disabled(textDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color(.secondarySystemBackground))
+        .clipShape(Capsule())
+    }
+
+    private func sendTypedText() {
+        let text = textDraft
+        textDraft = ""
+        textFieldFocused = false
+        viewModel.sendText(text)
     }
 
     private var statusLabel: some View {

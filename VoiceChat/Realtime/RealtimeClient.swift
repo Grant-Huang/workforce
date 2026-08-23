@@ -37,7 +37,15 @@ final class RealtimeClient: NSObject {
     /// `autoRespond: false` (the default here) leaves the server detecting end-of-speech
     /// and committing the input buffer, but lets the client decide *when* to actually
     /// trigger a reply via `requestResponse()` — see `RealtimeOutgoingEvent.sessionUpdate`.
-    func connect(baseURL: String, apiKey: String, model: String, instructions: String, voice: String, turnDetection: String? = "server_vad", autoRespond: Bool = false) {
+    ///
+    /// `onSessionReady` fires once the initial `session.update` is acked via
+    /// `session.updated` — callers must wait for it before treating the session as
+    /// actually usable (e.g. before showing "connected" or sending a turn). Firing the
+    /// initial config and moving on without waiting for this was a real bug: nothing
+    /// verified the session had actually come up, so a socket that opened but never
+    /// got a working session (a real observed Qwen failure mode, see
+    /// docs/qwen-realtime-voice-setup.md) looked identical to a healthy connection.
+    func connect(baseURL: String, apiKey: String, model: String, instructions: String, voice: String, turnDetection: String? = "server_vad", autoRespond: Bool = false, onSessionReady: @escaping () -> Void) {
         guard var components = URLComponents(string: baseURL) else {
             onError?("invalid WebSocket URL: \(baseURL)")
             return
@@ -59,7 +67,13 @@ final class RealtimeClient: NSObject {
         task.resume()
         receiveLoop()
 
+        pendingInstructionsAck = onSessionReady
         send(RealtimeOutgoingEvent.sessionUpdate(instructions: instructions, voice: voice, turnDetection: turnDetection, autoRespond: autoRespond))
+    }
+
+    /// Submits a typed or dictated-and-cleaned-up text message as a user turn.
+    func sendUserText(_ text: String) {
+        send(RealtimeOutgoingEvent.conversationItemCreateUserText(text))
     }
 
     func disconnect() {

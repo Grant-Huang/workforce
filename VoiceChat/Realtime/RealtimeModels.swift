@@ -80,6 +80,20 @@ enum RealtimeOutgoingEvent {
     static func responseCancel() -> [String: Any] {
         ["type": "response.cancel"]
     }
+
+    /// Submits a typed (or dictated-and-cleaned-up) text message as a user turn — the
+    /// counterpart to speaking, for the text-input path. Mirrors web-demo/static/app.js's
+    /// `sendTextMessage`.
+    static func conversationItemCreateUserText(_ text: String) -> [String: Any] {
+        [
+            "type": "conversation.item.create",
+            "item": [
+                "type": "message",
+                "role": "user",
+                "content": [["type": "input_text", "text": text]],
+            ],
+        ]
+    }
 }
 
 /// Parsed subset of incoming Realtime API events the UI/audio layer reacts to.

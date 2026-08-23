@@ -17,6 +17,12 @@ struct TranscriptLine: Identifiable {
     enum Speaker { case user, assistant }
 }
 
+struct SuggestionChip: Identifiable {
+    let id = UUID()
+    let label: String
+    let query: String
+}
+
 @MainActor
 final class ConversationViewModel: ObservableObject {
     @Published private(set) var state: ConversationState = .idle
@@ -27,6 +33,21 @@ final class ConversationViewModel: ObservableObject {
     let memoryStore = MemoryStore()
     private let agentNexusClient = AgentNexusClient()
     private var assistantLineIndex: Int?
+
+    // ---- connection lifecycle (ported from web-demo/static/app.js, 2026-08-22) ----
+    //
+    // Three rules: (a) a connection attempt that never actually produces a working
+    // session must surface an error, not hang silently forever; (b) once connected,
+    // never release on our own initiative; (c) if the user goes quiet for a long time
+    // while connected, release proactively instead of holding the socket open forever.
+    private static let connectTimeoutSeconds: UInt64 = 8
+    private static let idleTimeoutSeconds: UInt64 = 5 * 60
+    private var connectTimeoutTask: Task<Void, Never>?
+    private var idleTimeoutTask: Task<Void, Never>?
+    /// Set when the user asks to send a text message while idle — `start()` needs a
+    /// running session before the message can actually go out, so this is submitted
+    /// once the session becomes ready rather than sent immediately.
+    private var pendingTextOnReady: String?
 
     var systemInstructions = """
         你是一个语音助手，正在和用户实时语音对话。
@@ -45,20 +66,36 @@ final class ConversationViewModel: ObservableObject {
         - 常识性、闲聊性的问题正常回答，不用刻意强调"没有记录"。
         """
 
+    /// 0-1 time-based suggestions shown in the empty state (before any turns) —
+    /// restrained on purpose: no auto-speak, no auto-connect, just a tappable prompt.
+    /// Mirrors web-demo/static/app.js's `getTimeSuggestions`.
+    var suggestionChips: [SuggestionChip] {
+        let hour = Calendar.current.component(.hour, from: Date())
+        if hour < 12 {
+            return [SuggestionChip(label: "查一下今天的日程安排", query: "查一下我今天的日程安排")]
+        } else if hour >= 17 {
+            return [SuggestionChip(label: "总结复盘一下今天的工作", query: "帮我总结复盘一下今天的工作")]
+        }
+        return []
+    }
+
     func start() {
-        guard case .idle = state else { return }
+        switch state {
+        case .idle, .error: break
+        default: return
+        }
         guard let apiKey = APIKeyStore.load(), !apiKey.isEmpty else {
-            state = .error("请先在设置里填入 API Key")
+            setState(.error("请先在设置里填入 API Key"))
             return
         }
 
-        state = .connecting
+        setState(.connecting)
         wireCallbacks()
 
         do {
             try audio.start()
         } catch {
-            state = .error("麦克风启动失败：\(error.localizedDescription)")
+            setState(.error("麦克风启动失败：\(error.localizedDescription)"))
             return
         }
 
@@ -68,8 +105,28 @@ final class ConversationViewModel: ObservableObject {
             model: RealtimeConfigStore.model,
             instructions: systemInstructions,
             voice: RealtimeConfigStore.voice
-        )
-        state = .listening
+        ) { [weak self] in
+            guard let self else { return }
+            self.setState(.listening)
+            if let pending = self.pendingTextOnReady {
+                self.pendingTextOnReady = nil
+                self.submitUserText(pending)
+            }
+        }
+
+        // Belt-and-suspenders for rule (a): if the socket opens but the session never
+        // actually comes up (session.updated never arrives), don't sit at "连接中…"
+        // forever — a real observed failure mode, not hypothetical (see
+        // docs/qwen-realtime-voice-setup.md). Cleared by `setState` once we leave
+        // .connecting, from either the ready callback above or an error/disconnect.
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.connectTimeoutSeconds * 1_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            if case .connecting = self.state {
+                self.stop(reason: "连接超时，请重试")
+            }
+        }
 
         // Pull-sync from AgentNexus in the background — short REST call, not on the
         // conversation's critical path. If it fails or is slow, the conversation just
@@ -87,10 +144,56 @@ final class ConversationViewModel: ObservableObject {
         }
     }
 
-    func stop() {
+    func stop(reason: String? = nil) {
+        pendingTextOnReady = nil
         client.disconnect()
         audio.stop()
-        state = .idle
+        setState(reason.map { .error($0) } ?? .idle)
+    }
+
+    /// Every state transition goes through here so the idle/connect timers stay in
+    /// sync with what's actually displayed, instead of being armed/cleared ad hoc at
+    /// each call site (that's how the web version's equivalent bug surfaced — a state
+    /// change that forgot to clear a timer). `.listening` means "connected, waiting on
+    /// the user" — the only state that should count toward rule (c)'s idle clock;
+    /// anything else (still connecting, assistant talking, idle) clears it.
+    private func setState(_ next: ConversationState) {
+        state = next
+        if case .listening = next {
+            idleTimeoutTask?.cancel()
+            idleTimeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: Self.idleTimeoutSeconds * 1_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                self.stop(reason: "长时间没有说话，已自动挂断")
+            }
+        } else {
+            idleTimeoutTask?.cancel()
+            idleTimeoutTask = nil
+        }
+        if case .connecting = next {} else {
+            connectTimeoutTask?.cancel()
+            connectTimeoutTask = nil
+        }
+    }
+
+    /// Shared by the mic-driven voice turn path and the typed/dictated text path.
+    /// Starts the session first if needed — see `pendingTextOnReady`.
+    func sendText(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        switch state {
+        case .idle, .error:
+            pendingTextOnReady = trimmed
+            start()
+        default:
+            submitUserText(trimmed)
+        }
+    }
+
+    private func submitUserText(_ text: String) {
+        transcript.append(TranscriptLine(speaker: .user, text: text))
+        client.sendUserText(text)
+        groundAndRespond(to: text)
     }
 
     private func wireCallbacks() {
@@ -100,7 +203,7 @@ final class ConversationViewModel: ObservableObject {
 
         client.onAudioDelta = { [weak self] data in
             self?.audio.play(pcm16: data)
-            self?.state = .assistantSpeaking
+            self?.setState(.assistantSpeaking)
         }
 
         client.onTranscriptDelta = { [weak self] text in
@@ -125,24 +228,26 @@ final class ConversationViewModel: ObservableObject {
             self?.audio.interruptPlayback()
             self?.client.cancelResponse()
             self?.assistantLineIndex = nil
-            self?.state = .listening
+            self?.setState(.listening)
         }
 
         client.onResponseDone = { [weak self] in
             self?.assistantLineIndex = nil
-            self?.state = .listening
+            self?.setState(.listening)
         }
 
         client.onError = { [weak self] message in
-            self?.state = .error(message)
+            self?.pendingTextOnReady = nil
+            self?.setState(.error(message))
         }
 
         client.onDisconnect = { [weak self] error in
             guard let self else { return }
+            self.pendingTextOnReady = nil
             if let error {
-                self.state = .error(error.localizedDescription)
+                self.setState(.error(error.localizedDescription))
             } else {
-                self.state = .idle
+                self.setState(.idle)
             }
         }
     }
