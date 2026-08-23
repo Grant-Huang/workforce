@@ -75,11 +75,11 @@ wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=qwen-omni-turbo-realtime
 InternalError.Algo.InvalidParameter: Voice 'Chelsie' is not supported.
 ```
 
-新模型支持的音色是完全不同的一套，官方列了 47 个（[完整列表](https://help.aliyun.com/zh/model-studio/omni-voice-list)）。这个项目从中挑了 14 个测过、确认可用的作为候选列表（代码里 `web-demo/server.py` 的 `VOICE_OPTIONS` 和 iOS `RealtimeConfigStore.voiceOptions` 两处保持一致）：
+新模型支持的音色是完全不同的一套，官方列了 47 个（[完整列表](https://help.aliyun.com/zh/model-studio/omni-voice-list)）。项目里最初挑了 14 个测过确认可用的，2026-08-23 按需求精简成了这 6 个（代码里 `web-demo/server.py` 的 `VOICE_OPTIONS` 和 iOS `RealtimeConfigStore.voiceOptions` 两处保持一致，其余 8 个暂时移出候选列表，需要时可以照下面的方法加回来）：
 
-`Ethan`（男，标准普通话，默认）、`Tina`（女，甜美，官方默认）、`Cindy`（女，台湾腔）、`Serena`（女，温柔）、`Momo`（女，撒娇搞怪）、`Raymond`（男，清亮）、`Harvey`（男，低沉温和）、`Jennifer`（女，美语电影质感）、`Katerina`（女，御姐）、`Mia`（女，细腻）、`Aiden`（男，美语）、`Sohee`（女，韩语）、`Angel`（女，台式甜）、`Andre`（男，磁性沉稳）。
+`Serena`（女，温柔，**默认**）、`Tina`（女，甜美，官方默认）、`Sunnybobi`（女，大大咧咧的社恐邻家姑娘）、`Ethan`（男，标准普通话）、`Raymond`（男，清亮）、`Dylan`（男，北京话）。
 
-这 14 个是**逐个实测过**的（用 `session.update` 验证服务端接受这个音色参数，不是只看文档），全部返回 `session.updated` 正常确认，没有一个报错。如果想用列表之外的其他音色，先照着 `test_voice_list.py`（scratchpad 里的测试脚本，逻辑很简单）测一下能不能用，别直接假设文档里写的就一定对——`Chelsie` 这个坑就是文档和实际验证不一致的例子。
+这 6 个都是**逐个实测过**的（用 `session.update` 验证服务端接受这个音色参数，不是只看文档），全部返回 `session.updated` 正常确认，没有一个报错。`Dylan` 需要留意一点：官方文档里把它归在方言音色（北京话）分类下，跟其他几个不是同一批次列出的，但实测在 `qwen3.5-omni-flash-realtime` 上一样能用。如果想用列表之外的其他音色，先照着 `test_voice_list.py`（scratchpad 里的测试脚本，逻辑很简单）测一下能不能用，别直接假设文档里写的就一定对——`Chelsie` 这个坑就是文档和实际验证不一致的例子。
 
 ## 代码里的配置位置
 

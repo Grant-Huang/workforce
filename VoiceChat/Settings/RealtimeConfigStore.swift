@@ -24,26 +24,22 @@ enum RealtimeConfigStore {
 
     static let defaultBaseURL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
     static let defaultModel = "qwen3.5-omni-flash-realtime"
-    static let defaultVoice = "Ethan"
+    static let defaultVoice = "Serena"
 
-    /// Curated subset of the ~47 voices Qwen3.5-Omni-Realtime supports (full list:
-    /// https://help.aliyun.com/zh/model-studio/omni-voice-list). 'Chelsie', the old
-    /// default, isn't accepted by this model — "Voice 'Chelsie' is not supported."
+    /// Trimmed down to the requested shortlist (2026-08-23) — was a 14-voice curated
+    /// subset of the ~47 Qwen3.5-Omni-Realtime supports (full list:
+    /// https://help.aliyun.com/zh/model-studio/omni-voice-list), the rest parked for
+    /// later. Every entry here has been individually verified via a session.update
+    /// round-trip against qwen3.5-omni-flash-realtime + the workspace domain, not
+    /// just taken from docs — 'Chelsie', the old default, isn't accepted by this
+    /// model ("Voice 'Chelsie' is not supported."), so don't assume without testing.
     static let voiceOptions: [(id: String, label: String)] = [
-        ("Ethan", "Ethan（男，标准普通话）"),
+        ("Serena", "Serena（女，温柔，默认）"),
         ("Tina", "Tina（女，甜美，官方默认）"),
-        ("Cindy", "Cindy（女，台湾腔）"),
-        ("Serena", "Serena（女，温柔）"),
-        ("Momo", "Momo（女，撒娇搞怪）"),
+        ("Sunnybobi", "Sunnybobi（女，大大咧咧的社恐邻家姑娘）"),
+        ("Ethan", "Ethan（男，标准普通话）"),
         ("Raymond", "Raymond（男，清亮）"),
-        ("Harvey", "Harvey（男，低沉温和）"),
-        ("Jennifer", "Jennifer（女，美语电影质感）"),
-        ("Katerina", "Katerina（女，御姐）"),
-        ("Mia", "Mia（女，细腻）"),
-        ("Aiden", "Aiden（男，美语）"),
-        ("Sohee", "Sohee（女，韩语）"),
-        ("Angel", "Angel（女，台式甜）"),
-        ("Andre", "Andre（男，磁性沉稳）"),
+        ("Dylan", "Dylan（男，北京话）"),
     ]
 
     static var baseURL: String {

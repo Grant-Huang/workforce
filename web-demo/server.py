@@ -34,26 +34,22 @@ QWEN_WORKSPACE_ID = os.environ.get("QWEN_WORKSPACE_ID", "")
 QWEN_WS_BASE_SHARED = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
 QWEN_WS_BASE = os.environ.get("QWEN_WS_BASE", QWEN_WS_BASE_SHARED)
 QWEN_MODEL = os.environ.get("QWEN_MODEL", "qwen3.5-omni-flash-realtime")
-QWEN_VOICE = os.environ.get("QWEN_VOICE", "Ethan")
+QWEN_VOICE = os.environ.get("QWEN_VOICE", "Serena")
 
-# Curated subset of the ~47 voices Qwen3.5-Omni-Realtime supports (full list:
-# https://help.aliyun.com/zh/model-studio/omni-voice-list). 'Chelsie', the old
-# default, isn't accepted by this model -- "Voice 'Chelsie' is not supported."
+# Trimmed down to the requested shortlist (2026-08-23) -- was a 14-voice curated
+# subset of the ~47 Qwen3.5-Omni-Realtime supports (full list:
+# https://help.aliyun.com/zh/model-studio/omni-voice-list), the rest parked for
+# later. Every entry here has been individually verified via a session.update
+# round-trip against qwen3.5-omni-flash-realtime + the workspace domain, not just
+# taken from docs -- 'Chelsie', the old default, isn't accepted by this model
+# ("Voice 'Chelsie' is not supported."), so don't assume without testing.
 VOICE_OPTIONS = [
-    {"id": "Ethan", "label": "Ethan（男，标准普通话）"},
+    {"id": "Serena", "label": "Serena（女，温柔，默认）"},
     {"id": "Tina", "label": "Tina（女，甜美，官方默认）"},
-    {"id": "Cindy", "label": "Cindy（女，台湾腔）"},
-    {"id": "Serena", "label": "Serena（女，温柔）"},
-    {"id": "Momo", "label": "Momo（女，撒娇搞怪）"},
+    {"id": "Sunnybobi", "label": "Sunnybobi（女，大大咧咧的社恐邻家姑娘）"},
+    {"id": "Ethan", "label": "Ethan（男，标准普通话）"},
     {"id": "Raymond", "label": "Raymond（男，清亮）"},
-    {"id": "Harvey", "label": "Harvey（男，低沉温和）"},
-    {"id": "Jennifer", "label": "Jennifer（女，美语电影质感）"},
-    {"id": "Katerina", "label": "Katerina（女，御姐）"},
-    {"id": "Mia", "label": "Mia（女，细腻）"},
-    {"id": "Aiden", "label": "Aiden（男，美语）"},
-    {"id": "Sohee", "label": "Sohee（女，韩语）"},
-    {"id": "Angel", "label": "Angel（女，台式甜）"},
-    {"id": "Andre", "label": "Andre（男，磁性沉稳）"},
+    {"id": "Dylan", "label": "Dylan（男，北京话）"},
 ]
 
 

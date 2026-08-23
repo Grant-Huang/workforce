@@ -30,7 +30,7 @@ let nextPlayTime = 0;
 let activeSources = [];
 let assistantBubbleEl = null;
 let assistantHasDelta = false;
-let voice = "Ethan";
+let voice = "Serena";
 let startPromise = null; // in-flight start(), so typed messages can await a session already starting
 
 // ---- connection lifecycle ----
