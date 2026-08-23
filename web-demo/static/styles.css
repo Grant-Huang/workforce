@@ -31,19 +31,14 @@ body {
 .topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
+  gap: 12px;
   padding: 14px 20px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
-}
-
-.title {
-  font-weight: 600;
-  font-size: 15px;
+  background: var(--bg);
 }
 
 .status {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--muted);
 }
 
@@ -65,7 +60,7 @@ body {
 
 .empty {
   max-width: 640px;
-  margin: 80px auto 0;
+  margin: 140px auto 0;
   text-align: center;
   color: var(--muted);
   font-size: 14px;
@@ -130,20 +125,29 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 14px;
-  padding: 16px 18px 22px;
+  padding: 12px 18px 24px;
   background: linear-gradient(to top, var(--bg) 65%, transparent);
 }
 
-.textRow {
+/* Text input pill + voice button side by side in one row, not stacked — matches the
+   reference ChatGPT/Grok layout instead of a separate full-width mic button below. */
+.composerRow {
   width: 100%;
-  max-width: 560px;
+  max-width: 620px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.textRow {
+  flex: 1;
   display: flex;
   gap: 8px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 6px 6px 6px 18px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 .textInput {
@@ -171,10 +175,73 @@ body {
   transform: scale(0.95);
 }
 
-/* Single start/stop toggle button — one control, two visual states. */
+.dictateBtn {
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.dictateBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dictationRow {
+  width: 100%;
+  max-width: 620px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 8px 6px 6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.dictationStatus {
+  flex: 1;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.dictationCancelBtn,
+.dictationStopBtn {
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.dictationSendBtn {
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  font-size: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* Single start/stop toggle button — one control, two visual states. Sized to match
+   the composer pill's height and sit right beside it, not a separate full-width row. */
 .micBtn {
-  width: 72px;
-  height: 72px;
+  width: 46px;
+  height: 46px;
   border: none;
   border-radius: 50%;
   background: var(--accent);
@@ -183,12 +250,18 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   transition: background-color 0.15s ease, transform 0.1s ease;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
 }
 
 .micBtn:active {
   transform: scale(0.96);
+}
+
+.micBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .micBtn.active {
@@ -200,6 +273,6 @@ body {
 }
 
 @keyframes speakingPulse {
-  0%, 100% { box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12); }
-  50% { box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12), 0 0 0 10px rgba(229, 72, 77, 0.15); }
+  0%, 100% { box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12); }
+  50% { box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12), 0 0 0 8px rgba(229, 72, 77, 0.15); }
 }

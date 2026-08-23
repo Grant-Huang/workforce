@@ -79,4 +79,15 @@ enum RealtimeConfigStore {
     static func effectiveWorkspaceURL(for workspaceId: String) -> String {
         "wss://\(workspaceId.trimmingCharacters(in: .whitespacesAndNewlines)).cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime"
     }
+
+    /// Compatible-mode (plain HTTPS text completions, not the Realtime WS) base URL —
+    /// used only by `DictationCleanupClient`. Same workspace-domain-when-set,
+    /// shared-domain-fallback pattern as `effectiveBaseURL`.
+    static var effectiveCompatibleModeBaseURL: String {
+        let id = workspaceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !id.isEmpty {
+            return "https://\(id).cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+        }
+        return "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    }
 }

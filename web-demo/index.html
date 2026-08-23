@@ -9,7 +9,6 @@
 <body>
   <div class="app">
     <header class="topbar">
-      <span class="title">语音对话 Demo</span>
       <select id="voiceSelect" class="voiceSelect" aria-label="选择音色" title="选择音色"></select>
       <span class="status" id="status">未连接</span>
     </header>
@@ -22,26 +21,40 @@
     </main>
 
     <footer class="controls">
-      <form class="textRow" id="textForm">
-        <input
-          id="textInput"
-          class="textInput"
-          type="text"
-          placeholder="也可以直接打字…"
-          autocomplete="off"
-        />
-        <button type="submit" class="sendBtn" id="sendBtn" aria-label="发送">↑</button>
-      </form>
+      <!-- 一行放完打字/口述/语音三个入口，参照 ChatGPT App 的克制布局：一条胶囊装文字输入，
+           右边贴一个独立的语音对话按钮，不再用大圆按钮单独占一整行。见 docs/app-design.md 第一节。 -->
+      <div class="composerRow" id="composerRow">
+        <form class="textRow" id="textForm">
+          <input
+            id="textInput"
+            class="textInput"
+            type="text"
+            placeholder="询问或者说点什么…"
+            autocomplete="off"
+          />
+          <button type="button" class="dictateBtn" id="dictateBtn" aria-label="语音输入转文字">🎙</button>
+          <button type="submit" class="sendBtn" id="sendBtn" aria-label="发送">↑</button>
+        </form>
 
-      <button id="micBtn" class="micBtn" aria-label="开始/结束对话">
-        <svg id="micIcon" viewBox="0 0 24 24" width="30" height="30" fill="none">
-          <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z" fill="currentColor"/>
-          <path d="M19 11a7 7 0 0 1-14 0M12 19v3" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>
-        </svg>
-        <svg id="stopIcon" viewBox="0 0 24 24" width="26" height="26" fill="none" style="display:none">
-          <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>
-        </svg>
-      </button>
+        <button id="micBtn" class="micBtn" aria-label="开始/结束语音对话">
+          <svg id="micIcon" viewBox="0 0 24 24" width="22" height="22" fill="none">
+            <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z" fill="currentColor"/>
+            <path d="M19 11a7 7 0 0 1-14 0M12 19v3" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>
+          </svg>
+          <svg id="stopIcon" viewBox="0 0 24 24" width="18" height="18" fill="none" style="display:none">
+            <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- 口述转文字：录音中显示这一排，替代上面那一整行。X 取消；■ 停止后整理成文字回填到
+           输入框，可编辑再发；↑ 整理完直接发送，不用二次确认。见 docs/app-design.md 第三节。 -->
+      <div class="dictationRow" id="dictationRow" style="display:none">
+        <button type="button" class="dictationCancelBtn" id="dictationCancelBtn" aria-label="取消">✕</button>
+        <span class="dictationStatus" id="dictationStatus">正在聆听…</span>
+        <button type="button" class="dictationStopBtn" id="dictationStopBtn" aria-label="停止，整理后填入输入框">■</button>
+        <button type="button" class="dictationSendBtn" id="dictationSendBtn" aria-label="整理后直接发送">↑</button>
+      </div>
     </footer>
   </div>
 
