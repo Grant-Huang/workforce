@@ -47,6 +47,16 @@ body {
   color: var(--muted);
 }
 
+.voiceSelect {
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  max-width: 160px;
+}
+
 .chat {
   flex: 1;
   overflow-y: auto;

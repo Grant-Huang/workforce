@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var baseURL: String = RealtimeConfigStore.baseURL
     @State private var model: String = RealtimeConfigStore.model
     @State private var voice: String = RealtimeConfigStore.voice
+    @State private var workspaceId: String = RealtimeConfigStore.workspaceId
 
     @State private var agentNexusBaseURL: String = AgentNexusConfigStore.baseURL
     @State private var agentNexusChannelID: String = AgentNexusConfigStore.channelID
@@ -33,20 +34,38 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    TextField("llm-xxxxxxxxxxxxxxxx", text: $workspaceId)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    if !workspaceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(RealtimeConfigStore.effectiveWorkspaceURL(for: workspaceId))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("业务空间（Workspace ID）")
+                } footer: {
+                    Text("强烈建议填写——共享域名（不填时用的默认地址）在实测中出现过持续多天的 session.update 无响应问题，切到专属域名后彻底消失，详见 docs/qwen-realtime-voice-setup.md。在百炼控制台右上角图标里查看，注意别跟账号 ID 搞混（账号 ID 是纯数字，会报 \"Workspace endpoint is invalid\"）：https://help.aliyun.com/zh/model-studio/obtain-the-app-id-and-workspace-id")
+                }
+
+                Section {
                     TextField("wss://...", text: $baseURL)
                         .textContentType(.URL)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
+                        .disabled(!workspaceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     TextField("模型名称", text: $model)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
-                    TextField("音色", text: $voice)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
+                    Picker("音色", selection: $voice) {
+                        ForEach(RealtimeConfigStore.voiceOptions, id: \.id) { option in
+                            Text(option.label).tag(option.id)
+                        }
+                    }
                 } header: {
                     Text("连接设置")
                 } footer: {
-                    Text("默认值指向 Qwen-Audio-Realtime，具体地址/模型名请对照你的 DashScope/百炼控制台核实（这块变化较快）。要改用 OpenAI Realtime API，把地址改成 wss://api.openai.com/v1/realtime、模型改成 gpt-realtime，并到代码里把采集采样率从 16kHz 改回 24kHz。")
+                    Text("默认值指向 Qwen3.5-Omni-Realtime。填了上面的 Workspace ID 时，这里的地址会被忽略、自动换成专属域名（下面这个输入框会变灰）；没填时才会用这里的地址。要改用 OpenAI Realtime API，先清空 Workspace ID，再把地址改成 wss://api.openai.com/v1/realtime、模型改成 gpt-realtime，并到代码里把采集采样率从 16kHz 改回 24kHz。")
                 }
 
                 Section {
@@ -98,6 +117,7 @@ struct SettingsView: View {
                         RealtimeConfigStore.baseURL = baseURL
                         RealtimeConfigStore.model = model
                         RealtimeConfigStore.voice = voice
+                        RealtimeConfigStore.workspaceId = workspaceId
                         AgentNexusConfigStore.baseURL = agentNexusBaseURL
                         AgentNexusConfigStore.channelID = agentNexusChannelID
                         AgentNexusTokenStore.save(agentNexusToken)

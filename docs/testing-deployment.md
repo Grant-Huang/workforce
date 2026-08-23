@@ -36,8 +36,9 @@ open VoiceChat.xcodeproj
 
 1. App 打开后点右上角齿轮图标进入设置。
 2. 填入 API Key（保存到 Keychain，不会离开设备，除了发给 Qwen 的请求）。
-3. 连接地址/模型/音色已经预填好实测过的默认值（`wss://dashscope.aliyuncs.com/api-ws/v1/realtime` + `qwen-omni-turbo-realtime` + `Chelsie`），一般不用改；如果哪天连不上了，先怀疑这几个值是不是变了（Qwen 这条产品线迭代较快）。
-4. 点麦克风开始对话，点"记忆"图标（左上角大脑）能看到 App 目前记住的内容。
+3. **强烈建议填写"业务空间（Workspace ID）"**——留空时用共享域名，实测有过持续多天的稳定性问题（`session.update` 无响应）；填了之后自动切到专属域名，问题消失。获取方式和踩过的坑详见 `docs/qwen-realtime-voice-setup.md`。
+4. 模型/音色已经预填好实测过的默认值（`qwen3.5-omni-flash-realtime` + `Ethan`），音色可以在设置页的下拉菜单里换成另外 13 个测过能用的选项；一般不用改地址，除非哪天这些值又变了（Qwen 这条产品线迭代较快，建议先看上面那份配置指南文档）。
+5. 点麦克风开始对话，点"记忆"图标（左上角大脑）能看到 App 目前记住的内容。
 
 ### 常见问题
 

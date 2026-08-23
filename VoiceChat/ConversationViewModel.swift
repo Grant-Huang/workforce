@@ -63,7 +63,7 @@ final class ConversationViewModel: ObservableObject {
         }
 
         client.connect(
-            baseURL: RealtimeConfigStore.baseURL,
+            baseURL: RealtimeConfigStore.effectiveBaseURL,
             apiKey: apiKey,
             model: RealtimeConfigStore.model,
             instructions: systemInstructions,

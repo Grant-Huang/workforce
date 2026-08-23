@@ -24,9 +24,43 @@ BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR.parent / ".env")
 
 QWEN_API_KEY = os.environ.get("QWEN_API_KEY", "")
-QWEN_WS_BASE = os.environ.get("QWEN_WS_BASE", "wss://dashscope.aliyuncs.com/api-ws/v1/realtime")
-QWEN_MODEL = os.environ.get("QWEN_MODEL", "qwen-omni-turbo-realtime")
-QWEN_VOICE = os.environ.get("QWEN_VOICE", "Chelsie")
+# QWEN_WORKSPACE_ID switches to the workspace-specific domain, which fixed the
+# session.update hangs that plagued the shared dashscope.aliyuncs.com domain for
+# days (see README's "重大突破" section, 2026-08-23, and docs/qwen-realtime-voice-setup.md
+# for the full writeup). Get it from the 百炼 console (obtain-the-app-id-and-workspace-id
+# doc) -- it's the Workspace ID, NOT your account/主账号 UID, which looks similar but
+# gets rejected with "Workspace endpoint is invalid."
+QWEN_WORKSPACE_ID = os.environ.get("QWEN_WORKSPACE_ID", "")
+QWEN_WS_BASE_SHARED = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+QWEN_WS_BASE = os.environ.get("QWEN_WS_BASE", QWEN_WS_BASE_SHARED)
+QWEN_MODEL = os.environ.get("QWEN_MODEL", "qwen3.5-omni-flash-realtime")
+QWEN_VOICE = os.environ.get("QWEN_VOICE", "Ethan")
+
+# Curated subset of the ~47 voices Qwen3.5-Omni-Realtime supports (full list:
+# https://help.aliyun.com/zh/model-studio/omni-voice-list). 'Chelsie', the old
+# default, isn't accepted by this model -- "Voice 'Chelsie' is not supported."
+VOICE_OPTIONS = [
+    {"id": "Ethan", "label": "Ethan（男，标准普通话）"},
+    {"id": "Tina", "label": "Tina（女，甜美，官方默认）"},
+    {"id": "Cindy", "label": "Cindy（女，台湾腔）"},
+    {"id": "Serena", "label": "Serena（女，温柔）"},
+    {"id": "Momo", "label": "Momo（女，撒娇搞怪）"},
+    {"id": "Raymond", "label": "Raymond（男，清亮）"},
+    {"id": "Harvey", "label": "Harvey（男，低沉温和）"},
+    {"id": "Jennifer", "label": "Jennifer（女，美语电影质感）"},
+    {"id": "Katerina", "label": "Katerina（女，御姐）"},
+    {"id": "Mia", "label": "Mia（女，细腻）"},
+    {"id": "Aiden", "label": "Aiden（男，美语）"},
+    {"id": "Sohee", "label": "Sohee（女，韩语）"},
+    {"id": "Angel", "label": "Angel（女，台式甜）"},
+    {"id": "Andre", "label": "Andre（男，磁性沉稳）"},
+]
+
+
+def upstream_ws_base():
+    if QWEN_WORKSPACE_ID:
+        return f"wss://{QWEN_WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime"
+    return QWEN_WS_BASE
 
 
 async def index(request):
@@ -34,7 +68,12 @@ async def index(request):
 
 
 async def config(request):
-    return web.json_response({"voice": QWEN_VOICE, "hasKey": bool(QWEN_API_KEY)})
+    return web.json_response({
+        "voice": QWEN_VOICE,
+        "voices": VOICE_OPTIONS,
+        "hasKey": bool(QWEN_API_KEY),
+        "hasWorkspaceId": bool(QWEN_WORKSPACE_ID),
+    })
 
 
 async def relay(request):
@@ -46,7 +85,7 @@ async def relay(request):
         await ws_client.close()
         return ws_client
 
-    upstream_url = f"{QWEN_WS_BASE}?model={QWEN_MODEL}"
+    upstream_url = f"{upstream_ws_base()}?model={QWEN_MODEL}"
     headers = {"Authorization": f"Bearer {QWEN_API_KEY}"}
 
     try:
@@ -89,6 +128,8 @@ agentnexus_mock.register(app)
 app.router.add_static("/static/", BASE_DIR / "static")
 
 if __name__ == "__main__":
+    domain_kind = "workspace-specific" if QWEN_WORKSPACE_ID else "shared (consider setting QWEN_WORKSPACE_ID)"
     print(f"Model: {QWEN_MODEL}  Voice: {QWEN_VOICE}  Key loaded: {bool(QWEN_API_KEY)}")
+    print(f"Realtime endpoint: {upstream_ws_base()} [{domain_kind}]")
     print("AgentNexus mock: /agentnexus-mock/* (see agentnexus_mock.py)")
     web.run_app(app, host="127.0.0.1", port=8765)

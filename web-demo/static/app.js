@@ -30,7 +30,7 @@ let nextPlayTime = 0;
 let activeSources = [];
 let assistantBubbleEl = null;
 let assistantHasDelta = false;
-let voice = "Chelsie";
+let voice = "Ethan";
 let startPromise = null; // in-flight start(), so typed messages can await a session already starting
 
 // ---- connection lifecycle ----
@@ -540,12 +540,36 @@ function renderSuggestions() {
   }
 }
 
+// Voice is chosen per-browser: server tells us the default and the full option list,
+// but once the user picks one here it's remembered in localStorage across reloads
+// (a per-browser convenience, not synced anywhere).
+const VOICE_STORAGE_KEY = "voiceChat.voice";
+const voiceSelect = document.getElementById("voiceSelect");
+
+function populateVoiceSelect(options, selected) {
+  voiceSelect.innerHTML = "";
+  for (const opt of options) {
+    const el = document.createElement("option");
+    el.value = opt.id;
+    el.textContent = opt.label;
+    voiceSelect.appendChild(el);
+  }
+  voiceSelect.value = selected;
+}
+
+voiceSelect.addEventListener("change", () => {
+  voice = voiceSelect.value;
+  localStorage.setItem(VOICE_STORAGE_KEY, voice);
+});
+
 (async () => {
   try {
     const res = await fetch("/api/config");
     const config = await res.json();
-    voice = config.voice || voice;
+    voice = localStorage.getItem(VOICE_STORAGE_KEY) || config.voice || voice;
+    populateVoiceSelect(config.voices || [{ id: voice, label: voice }], voice);
     if (!config.hasKey) statusEl.textContent = "⚠️ 服务器没有读到 QWEN_API_KEY，请检查 .env";
+    else if (!config.hasWorkspaceId) statusEl.textContent = "⚠️ 未配置 QWEN_WORKSPACE_ID，使用共享域名（稳定性较差，见 README）";
   } catch (e) {
     statusEl.textContent = "⚠️ 无法连接本地服务";
   }
