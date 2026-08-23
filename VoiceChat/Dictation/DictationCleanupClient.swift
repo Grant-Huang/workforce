@@ -22,7 +22,12 @@ enum DictationCleanupError: LocalizedError {
 /// stand-in transcripts (this Swift port itself is unverified — see
 /// docs/testing-deployment.md's testing-coverage note).
 enum DictationCleanupClient {
-    private static let model = "qwen3.5-flash"
+    // qwen3.5-flash originally measured a real 17-35s+ latency here (once exceeding
+    // a 30s timeout); qwen-turbo on the same endpoint/domain measured 0.9-4.3s across
+    // three calls with no quality loss on this task -- an infra/model-tier issue, not
+    // something inherent to the cleanup call itself. See web-demo/server.py's
+    // matching comment and docs/app-design.md section 3.4.
+    private static let model = "qwen-turbo"
     private static let prompt = """
         把用户口述的这段话，整理成一段通顺、结构清晰的书面文字。\
         去掉口语里的语气词、重复、停顿词（"呃""就是""然后""那个"这些），\
@@ -32,11 +37,11 @@ enum DictationCleanupClient {
         直接给出整理后的文字，不要加任何前缀说明。
         """
 
-    /// Measured latency (web demo, 2026-08-23): highly variable, 17-35+ seconds
-    /// observed across several calls, once exceeding a 30s timeout. Callers must show
-    /// a "整理中…" wait state and not assume this is fast — the 65s request timeout
-    /// here matches the client-side backstop the web version added after hitting that
-    /// variance directly.
+    /// Measured latency with qwen-turbo (web demo, 2026-08-23): 0.9-4.3s across three
+    /// calls — the earlier qwen3.5-flash choice measured a real 17-35s+, so this is a
+    /// meaningful improvement, not a rounding difference. Still show a brief "整理中…"
+    /// state (this is a network call, not instant) and don't remove the 65s timeout —
+    /// it's a safety net for real variance, not the expected case.
     static func cleanup(_ rawText: String) async throws -> String {
         guard let apiKey = APIKeyStore.load(), !apiKey.isEmpty else {
             throw DictationCleanupError.noAPIKey

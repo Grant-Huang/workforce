@@ -57,13 +57,17 @@ VOICE_OPTIONS = [
 # The dictate-to-text mode's "AI cleanup" step (docs/app-design.md section 3.2) --
 # a one-shot plain text call, not the Realtime WS. Deliberately a lighter model than
 # the realtime conversation: this task is just cleanup, not open-ended reasoning.
-# Measured latency against this endpoint (2026-08-23), across several calls: as low
-# as ~17s, as high as ~35s, one call exceeded the 30s timeout that was in place at
-# the time. Real variance, not a fluke -- the UI must show an explicit "整理中…"
-# wait state and tolerate a genuinely long wait (both server and client now have
-# their own timeouts, see /api/dictation-cleanup and finishDictation in app.js), not
-# assume any single sample is a safe upper bound.
-QWEN_TEXT_MODEL = os.environ.get("QWEN_TEXT_MODEL", "qwen3.5-flash")
+#
+# qwen3.5-flash was the original choice here and measured a real, reproducible 17-35s+
+# latency (once exceeding a 30s timeout) -- bad enough that both server and client
+# needed their own timeout backstops (see below and finishDictation in app.js). Swapping
+# to qwen-turbo (same endpoint, same domain, only the model name differs) measured
+# 0.9-4.3s across three calls with no quality loss on this task -- a real infra-vs-model
+# distinction, not a fluke: same request path, ~10x faster with a smaller/older model.
+# The 60s/65s timeouts stay in place as a safety net (variance can still happen), but
+# the UI's "整理中…" wait should now be brief in the common case, not a genuinely long
+# wait to design around.
+QWEN_TEXT_MODEL = os.environ.get("QWEN_TEXT_MODEL", "qwen-turbo")
 DICTATION_CLEANUP_PROMPT = (
     "把用户口述的这段话，整理成一段通顺、结构清晰的书面文字。"
     "去掉口语里的语气词、重复、停顿词（\"呃\"\"就是\"\"然后\"\"那个\"这些），"
