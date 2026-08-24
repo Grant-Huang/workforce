@@ -25,6 +25,8 @@ const stopIcon = document.getElementById("stopIcon");
 const composerRow = document.getElementById("composerRow");
 const textForm = document.getElementById("textForm");
 const textInput = document.getElementById("textInput");
+const voiceOrbContainer = document.getElementById("voiceOrbContainer");
+const voiceOrb = document.getElementById("voiceOrb");
 
 const STATE = { IDLE: "idle", CONNECTING: "connecting", LISTENING: "listening", SPEAKING: "speaking" };
 let state = STATE.IDLE;
@@ -38,6 +40,9 @@ let playElement = null; // <audio> element playback is routed through, for echo 
 let processorNode = null;
 let nextPlayTime = 0;
 let activeSources = [];
+let micAnalyser = null; // taps the mic capture graph, read while LISTENING -- see updateVoiceOrb()
+let playAnalyser = null; // taps the playback graph, read while SPEAKING -- see updateVoiceOrb()
+let orbAnimationId = null;
 let assistantBubbleEl = null;
 let assistantHasDelta = false;
 let voice = "Serena";
@@ -102,6 +107,13 @@ function setState(next, statusOverride) {
   else clearIdleTimer();
 
   renderDictationUI(); // keep the dictate button's enabled state in sync (can't run both mics at once)
+
+  // Transcript is hidden behind the tech orb for the whole time the voice session is
+  // connected (not just while actually listening/speaking) -- docs/app-design.md 8.3.
+  // It's still being recorded into chatEl in real time underneath; this only toggles
+  // which one is visible, so nothing about the history data model changes.
+  if (next === STATE.IDLE) stopVoiceOrb();
+  else startVoiceOrb();
 
   if (next !== STATE.CONNECTING && connectTimeoutId) {
     clearTimeout(connectTimeoutId);
@@ -218,6 +230,11 @@ function setupPlayback() {
     document.body.appendChild(playElement);
   }
   playElement.srcObject = playDestNode.stream;
+
+  // Gives updateVoiceOrb() something to read while SPEAKING -- each chunk's source node
+  // fans out to this in addition to playDestNode, doesn't affect actual playback.
+  playAnalyser = playCtx.createAnalyser();
+  playAnalyser.fftSize = 256;
 }
 
 function playPCM16Chunk(base64) {
@@ -231,6 +248,7 @@ function playPCM16Chunk(base64) {
   const source = playCtx.createBufferSource();
   source.buffer = buffer;
   source.connect(playDestNode);
+  if (playAnalyser) source.connect(playAnalyser);
 
   const startAt = Math.max(nextPlayTime, playCtx.currentTime);
   source.start(startAt);
@@ -240,6 +258,58 @@ function playPCM16Chunk(base64) {
   source.onended = () => {
     activeSources = activeSources.filter((s) => s !== source);
   };
+}
+
+// ---- voice-session "tech orb" (docs/app-design.md 8.3) ----
+//
+// Replaces #chat while the voice session is connected. Light-blue glow that reacts to
+// whichever audio is actually live right now -- the user's mic input while LISTENING,
+// the assistant's playback while SPEAKING -- via the analysers wired up in start()'s
+// mic-capture block and setupPlayback() above. A slow sine-driven "breathing" baseline
+// keeps it visibly alive during CONNECTING or brief silence, instead of going static.
+
+function readAnalyserLevel(analyser) {
+  if (!analyser) return 0;
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(data);
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) sum += data[i];
+  const avg = sum / data.length; // 0-255
+  return Math.min(1, avg / 90); // 90, not 255: normal speech shouldn't need to peak the scale to register
+}
+
+function updateVoiceOrb() {
+  let level = 0;
+  if (state === STATE.LISTENING) level = readAnalyserLevel(micAnalyser);
+  else if (state === STATE.SPEAKING) level = readAnalyserLevel(playAnalyser);
+
+  const breathe = 0.05 * (1 + Math.sin(Date.now() / 900));
+  const scale = 1 + breathe + level * 0.35;
+  const glowSpread = 14 + level * 40;
+  const glowOpacity = 0.35 + level * 0.35;
+
+  voiceOrb.style.transform = `scale(${scale.toFixed(3)})`;
+  voiceOrb.style.boxShadow = `0 0 ${glowSpread.toFixed(0)}px ${(glowSpread / 3).toFixed(0)}px rgba(79, 168, 255, ${glowOpacity.toFixed(2)})`;
+
+  orbAnimationId = requestAnimationFrame(updateVoiceOrb);
+}
+
+function startVoiceOrb() {
+  chatEl.style.display = "none";
+  voiceOrbContainer.style.display = "flex";
+  if (!orbAnimationId) updateVoiceOrb();
+}
+
+function stopVoiceOrb() {
+  voiceOrbContainer.style.display = "none";
+  chatEl.style.display = "";
+  if (orbAnimationId) {
+    cancelAnimationFrame(orbAnimationId);
+    orbAnimationId = null;
+  }
+  voiceOrb.style.transform = "";
+  voiceOrb.style.boxShadow = "";
+  chatEl.scrollTop = chatEl.scrollHeight; // reveal the just-finished turn at the bottom
 }
 
 function stopPlayback() {
@@ -476,6 +546,12 @@ async function start() {
       source.connect(processorNode);
       processorNode.connect(silentGain);
       silentGain.connect(captureCtx.destination);
+
+      // Fan the same mic source out to an analyser too -- doesn't affect the capture
+      // pipeline above, just gives updateVoiceOrb() something to read while LISTENING.
+      micAnalyser = captureCtx.createAnalyser();
+      micAnalyser.fftSize = 256;
+      source.connect(micAnalyser);
     }
 
     lastConnErrorMessage = null;
@@ -552,8 +628,8 @@ async function start() {
       // whatever we grabbed before attempting the connection and go back to idle so
       // the user can retry instead of being stuck mid-"连接中…".
       if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
-      if (captureCtx) { captureCtx.close(); captureCtx = null; }
-      if (playCtx) { playCtx.close(); playCtx = null; playDestNode = null; if (playElement) playElement.srcObject = null; }
+      if (captureCtx) { captureCtx.close(); captureCtx = null; micAnalyser = null; }
+      if (playCtx) { playCtx.close(); playCtx = null; playDestNode = null; playAnalyser = null; if (playElement) playElement.srcObject = null; }
       ws = null;
       setState(STATE.IDLE, lastConnErrorMessage || "连接失败，请稍后重试");
     }
@@ -584,12 +660,14 @@ function stop(reason) {
   if (captureCtx) {
     captureCtx.close();
     captureCtx = null;
+    micAnalyser = null;
   }
   stopPlayback();
   if (playCtx) {
     playCtx.close();
     playCtx = null;
     playDestNode = null;
+    playAnalyser = null;
     if (playElement) playElement.srcObject = null;
   }
   if (micStream) {

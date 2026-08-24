@@ -20,6 +20,13 @@
       </div>
     </main>
 
+    <!-- Shown instead of #chat while the voice session is active (docs/app-design.md
+         8.3): the transcript keeps recording in the background as usual, it's just not
+         displayed until the voice session ends, when #chat is revealed again. -->
+    <div class="voiceOrbContainer" id="voiceOrbContainer" style="display:none">
+      <div class="voiceOrb" id="voiceOrb"></div>
+    </div>
+
     <footer class="controls">
       <!-- 一行放完打字/口述/语音三个入口，参照 ChatGPT App 的克制布局：一条胶囊装文字输入，
            右边贴一个独立的语音对话按钮，不再用大圆按钮单独占一整行。见 docs/app-design.md 第一节。 -->
