@@ -109,11 +109,28 @@ final class RealtimeClient: NSObject {
         send(RealtimeOutgoingEvent.responseCancel())
     }
 
-    private func send(_ payload: [String: Any]) {
+    /// Real-device bug (2026-08-24): the WebSocket upgrade can complete successfully
+    /// (`task.response` reporting `HTTP 101`) while the underlying `nw_flow` is still not
+    /// write-ready yet — observed as `nw_flow_add_write_request ... cannot accept write
+    /// requests` in the console, surfacing here as a `send()` failure with "Socket is not
+    /// connected" despite the handshake having genuinely succeeded. Reproduced 100% of
+    /// the time over cellular on the affected device, right on `connect()`'s first send
+    /// (the `session.update` fired immediately after `task.resume()`, per Apple's own
+    /// documented usage — no delay to wait out on our side). One retry after a short
+    /// delay is a cheap, low-risk way to ride out that race instead of surfacing an
+    /// error for a connection that's actually fine a moment later; a second failure is
+    /// treated as real.
+    private func send(_ payload: [String: Any], isRetry: Bool = false) {
         guard let task, let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
         let message = URLSessionWebSocketTask.Message.data(data)
         task.send(message) { [weak self] error in
             guard let self, let error else { return }
+            guard isRetry else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    self?.send(payload, isRetry: true)
+                }
+                return
+            }
             self.deliver { self.onError?("send failed: \(error.localizedDescription)\(self.handshakeDiagnostic)") }
         }
     }
