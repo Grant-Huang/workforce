@@ -31,7 +31,20 @@ enum RealtimeOutgoingEvent {
         if let turnDetection {
             session["turn_detection"] = [
                 "type": turnDetection,
-                "threshold": 0.5,
+                // Raised from the default 0.5 to 0.65 on 2026-08-24 -- real-device
+                // testing on the web port found the voice session's barge-in was very
+                // easily triggered by background noise; ported the same bump here for
+                // parity even though iOS hasn't been device-tested yet, since this is
+                // a server-side VAD threshold and the underlying sensitivity issue
+                // isn't specific to either client. Only the voice session's barge-in
+                // (client.onSpeechStarted in ConversationViewModel) is actually
+                // affected by this in practice -- the text session never sends audio,
+                // and dictation doesn't generate a reply to interrupt -- but this
+                // threshold is shared across all three calls to sessionUpdate(), and
+                // raising it has no downside for those. Not re-tuned against real
+                // speech yet (docs/roadmap-todo.md's "VAD 阈值调优" item) -- a single
+                // bump based on one web-side report, not a scientifically chosen value.
+                "threshold": 0.65,
                 "prefix_padding_ms": 300,
                 "silence_duration_ms": 500,
                 "create_response": autoRespond,

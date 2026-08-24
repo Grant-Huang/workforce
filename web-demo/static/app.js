@@ -191,8 +191,24 @@ function base64ToInt16(base64) {
 // This couldn't be verified with a real speaker+mic acoustic loop in this sandbox (no
 // real audio hardware here) -- it addresses the documented likely cause, but needs
 // hands-on confirmation on a real device.
+//
+// 2026-08-24: real-device testing found a regression from this same routing change --
+// audible clicking/ticking noise ("哒哒哒哒哒") during assistant playback that wasn't
+// there before. Likely cause: forcing the AudioContext itself to run at 24000Hz (to
+// match the incoming PCM16 chunks 1:1, avoiding a resample inside the Web Audio graph)
+// means the MediaStreamAudioDestinationNode's output -- and therefore what the <audio>
+// element actually plays -- is also 24000Hz, a non-native rate for most audio hardware
+// (commonly 48000Hz). Direct-to-.destination playback goes through Chromium's mature,
+// glitch-free output resampler; MediaStreamTrack/<audio>-element playback goes through
+// a different pipeline (built primarily for WebRTC audio) that's known to click/pop on
+// non-native sample rates. Fix: let the context run at the browser's native rate (don't
+// force sampleRate) -- createBuffer() still declares each chunk's real rate (24000)
+// explicitly, and the Web Audio spec has the source node auto-resample on playback, so
+// no behavior changes except which resampler does the work. Not acoustically verified
+// in this sandbox (same caveat as the AEC fix above) -- needs real-device confirmation
+// that the clicking is actually gone.
 function setupPlayback() {
-  playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+  playCtx = new (window.AudioContext || window.webkitAudioContext)();
   nextPlayTime = 0;
   playDestNode = playCtx.createMediaStreamDestination();
   if (!playElement) {
@@ -511,9 +527,21 @@ async function start() {
         voice,
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
+        // threshold raised from the default 0.5 to 0.65 on 2026-08-24 -- real-device
+        // testing found the assistant was very easily barge-in'd by background noise
+        // (the user's own description: "随便一些其他的声音，可能它就停止说话或者中断
+        // 了"). This only touches the voice session's turn_detection -- the one wired
+        // to speech_started -> response.cancel (see handleServerEvent below) -- since
+        // that's the only session where "being interrupted" is user-visible; the text
+        // session and dictation's turn_detection govern something else (when to commit
+        // the input buffer for transcription) and weren't touched. Not re-tuned against
+        // real speech yet (docs/roadmap-todo.md's "VAD 阈值调优" item) -- this is a
+        // single bump based on one report, not a scientifically chosen value; may need
+        // another round if 0.65 turns out to be too high (real speech gets missed) or
+        // still too low (still over-triggers).
         turn_detection: {
           type: "server_vad",
-          threshold: 0.5,
+          threshold: 0.65,
           prefix_padding_ms: 300,
           silence_duration_ms: 500,
           create_response: false,
