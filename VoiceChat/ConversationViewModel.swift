@@ -45,6 +45,11 @@ final class ConversationViewModel: ObservableObject {
     /// voice session's status label (that label is exactly what must never show
     /// "正在聆听"-style text for a text turn). Mirrors `DictationViewModel.errorMessage`.
     @Published var textSessionError: String?
+    /// RMS level (mic input while `.listening`, playback while `.assistantSpeaking`)
+    /// driving `ConversationView.voiceOrbView` — see docs/app-design.md 8.3. Only
+    /// meaningful while `state` is one of those two cases; `wireCallbacks()` guards
+    /// each callback so a stale reading from the other source never leaks through.
+    @Published private(set) var orbLevel: Double = 0
 
     private let audio = AudioIOManager()
     private var client = RealtimeClient()
@@ -53,6 +58,11 @@ final class ConversationViewModel: ObservableObject {
     private var textClient = RealtimeClient()
     let memoryStore = MemoryStore()
     private let agentNexusClient = AgentNexusClient()
+    /// Full conversation record, independent of `memoryStore` (extracted/searchable
+    /// fragments) — see `ConversationHistoryStore`'s doc comment and docs/app-design.md
+    /// 8.4. Shared by both sessions the same way `transcript` is. Built in `init()`
+    /// (not inline) since it depends on `agentNexusClient`.
+    private let conversationHistory: ConversationHistoryStore
     /// Shared between the voice and text sessions' streaming-reply-line building —
     /// safe only because the two sessions are mutually exclusive (`ConversationView`
     /// disables each one's entry points while the other is active), same as
@@ -79,6 +89,8 @@ final class ConversationViewModel: ObservableObject {
     private var foregroundObserver: NSObjectProtocol?
 
     init() {
+        conversationHistory = ConversationHistoryStore(agentNexusClient: agentNexusClient)
+
         // Refresh the local memory cache when the app comes back to the foreground, on
         // top of the existing pull-on-conversation-start -- covers "memory changed on
         // another device while this one sat backgrounded" without needing to poll on a
@@ -204,14 +216,20 @@ final class ConversationViewModel: ObservableObject {
     private func pullMemoryInBackground() {
         Task { [weak self] in
             guard let self, AgentNexusConfigStore.isConfigured else { return }
-            guard let entries = try? await self.agentNexusClient.fetchMemoryEntries() else { return }
-            let formatter = ISO8601DateFormatter()
-            let mapped = entries.map { entry -> (text: String, timestamp: Date, sourceId: String) in
-                let text = entry.title.map { "\($0)：\(entry.content)" } ?? entry.content
-                let date = entry.updatedAt.flatMap { formatter.date(from: $0) } ?? Date()
-                return (text, date, entry.entryId)
+            if let entries = try? await self.agentNexusClient.fetchMemoryEntries() {
+                let formatter = ISO8601DateFormatter()
+                let mapped = entries.map { entry -> (text: String, timestamp: Date, sourceId: String) in
+                    let text = entry.title.map { "\($0)：\(entry.content)" } ?? entry.content
+                    let date = entry.updatedAt.flatMap { formatter.date(from: $0) } ?? Date()
+                    return (text, date, entry.entryId)
+                }
+                self.memoryStore.merge(remoteEntries: mapped)
             }
-            self.memoryStore.merge(remoteEntries: mapped)
+            // Independent of whether the memory pull above succeeded -- a transient
+            // hiccup on one network call doesn't mean the other will also fail, and
+            // this is exactly the kind of "we likely have network" moment
+            // ConversationHistoryStore's retry is meant to ride alongside (item 4).
+            self.conversationHistory.retryUnsynced()
         }
     }
 
@@ -229,6 +247,13 @@ final class ConversationViewModel: ObservableObject {
     /// anything else (still connecting, assistant talking, idle) clears it.
     private func setState(_ next: ConversationState) {
         state = next
+        // .listening and .assistantSpeaking each drive orbLevel from their own source
+        // (see wireCallbacks' onInputLevel/onOutputLevel); every other state has no
+        // live audio to reflect, so reset it rather than leaving a stale reading.
+        switch next {
+        case .listening, .assistantSpeaking: break
+        default: orbLevel = 0
+        }
         if case .listening = next {
             idleTimeoutTask?.cancel()
             idleTimeoutTask = Task { [weak self] in
@@ -251,6 +276,22 @@ final class ConversationViewModel: ObservableObject {
             self?.client.sendAudioChunk(data)
         }
 
+        // Fired on an audio thread -- hop to the main actor before touching @Published
+        // state. Guarded by `state` so a reading from the "wrong" source (e.g. leftover
+        // playback level right after a barge-in) never briefly drives the orb.
+        audio.onInputLevel = { [weak self] level in
+            Task { @MainActor [weak self] in
+                guard let self, case .listening = self.state else { return }
+                self.orbLevel = Double(level)
+            }
+        }
+        audio.onOutputLevel = { [weak self] level in
+            Task { @MainActor [weak self] in
+                guard let self, case .assistantSpeaking = self.state else { return }
+                self.orbLevel = Double(level)
+            }
+        }
+
         client.onAudioDelta = { [weak self] data in
             self?.audio.play(pcm16: data)
             self?.setState(.assistantSpeaking)
@@ -269,12 +310,15 @@ final class ConversationViewModel: ObservableObject {
 
         client.onUserTranscript = { [weak self] text in
             guard let self, !text.isEmpty else { return }
-            self.transcript.append(TranscriptLine(speaker: .user, text: text))
+            self.appendUserTurn(text)
             self.groundAndRespond(to: text, session: self.client)
         }
 
         client.onSpeechStarted = { [weak self] in
-            // User barged in — stop the assistant immediately.
+            // User barged in — stop the assistant immediately. Not calling
+            // finalizeAssistantTurn() here is deliberate: this is an interrupted,
+            // incomplete reply, not a finished turn, so it's discarded rather than
+            // persisted half-formed (matches web-demo's app.js).
             self?.audio.interruptPlayback()
             self?.client.cancelResponse()
             self?.assistantLineIndex = nil
@@ -282,7 +326,7 @@ final class ConversationViewModel: ObservableObject {
         }
 
         client.onResponseDone = { [weak self] in
-            self?.assistantLineIndex = nil
+            self?.finalizeAssistantTurn()
             self?.setState(.listening)
         }
 
@@ -321,12 +365,23 @@ final class ConversationViewModel: ObservableObject {
     /// duplicated between the two, mirroring web-demo/static/app.js's
     /// `handleUserTurn(text, session)`.
     private func groundAndRespond(to userText: String, session: RealtimeClient) {
-        agentNexusClient.pushMessage(userText)
+        // Pushing this turn to AgentNexus (with sync-status tracking + retry) is
+        // handled by conversationHistory.add(), triggered from appendUserTurn() right
+        // before this function runs at every call site -- not duplicated here.
 
         if let saveIntent = SaveIntent.detect(userText) {
-            memoryStore.add(saveIntent.content)
+            // source defaults to "local" here (not "agentnexus") -- honestly reflects
+            // "not yet confirmed synced" until createMemoryEntry below actually
+            // succeeds, per docs/roadmap-todo.md's "记忆" section item 3. "过户" to
+            // agentnexus + the real sourceId happens via markSynced once that's
+            // confirmed, not assumed up front.
+            let localEntry = memoryStore.add(saveIntent.content)
             Task { [weak self] in
-                try? await self?.agentNexusClient.createMemoryEntry(layer: "PROGRESS", content: saveIntent.content)
+                guard let self else { return }
+                if let created = try? await self.agentNexusClient.createMemoryEntry(layer: "PROGRESS", content: saveIntent.content),
+                   let localEntry {
+                    self.memoryStore.markSynced(id: localEntry.id, source: MemorySource.agentNexus, sourceId: created.entryId)
+                }
             }
             let instructions = systemInstructions
                 + "\n\n用户刚才明确要求记住这件事：\"\(saveIntent.content)\"，你已经帮TA记下了。只需要简短确认一句就行，不要复述内容、不要追问。"
@@ -454,7 +509,7 @@ final class ConversationViewModel: ObservableObject {
     }
 
     private func submitTextSessionMessage(_ text: String) {
-        transcript.append(TranscriptLine(speaker: .user, text: text))
+        appendUserTurn(text)
         textClient.sendUserText(text)
         groundAndRespond(to: text, session: textClient)
     }
@@ -505,7 +560,7 @@ final class ConversationViewModel: ObservableObject {
         }
 
         textClient.onResponseDone = { [weak self] in
-            self?.assistantLineIndex = nil
+            self?.finalizeAssistantTurn()
         }
 
         textClient.onError = { [weak self] message in
@@ -524,5 +579,28 @@ final class ConversationViewModel: ObservableObject {
             transcript.append(TranscriptLine(speaker: .assistant, text: delta))
             assistantLineIndex = transcript.count - 1
         }
+    }
+
+    /// Single append point for every user-turn source (voice transcript, typed,
+    /// dictation) — covers `transcript` (in-memory, for the UI) and
+    /// `conversationHistory` (persisted) in one place, mirroring web-demo's addBubble().
+    private func appendUserTurn(_ text: String) {
+        transcript.append(TranscriptLine(speaker: .user, text: text))
+        conversationHistory.add(speaker: .user, text: text)
+    }
+
+    /// Called once an assistant reply is actually complete (onResponseDone) — captures
+    /// the full accumulated line text before assistantLineIndex gets reset, persists it
+    /// locally and pushes it to AgentNexus (docs/app-design.md 8.4: previously only the
+    /// user's half of the conversation was pushed/stored anywhere at all). Deliberately
+    /// not called from onSpeechStarted's barge-in reset — see that callback's comment.
+    private func finalizeAssistantTurn() {
+        if let index = assistantLineIndex, index < transcript.count {
+            let text = transcript[index].text
+            // conversationHistory.add() also pushes to AgentNexus (with sync-status
+            // tracking + retry) -- see ConversationHistoryStore.
+            if !text.isEmpty { conversationHistory.add(speaker: .assistant, text: text) }
+        }
+        assistantLineIndex = nil
     }
 }

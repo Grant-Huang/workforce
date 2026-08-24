@@ -29,6 +29,13 @@ final class AudioIOManager {
     )!
 
     var onCapturedChunk: ((Data) -> Void)?
+    /// RMS amplitude (roughly 0...0.3 for normal speech, unclamped) of the mic input /
+    /// assistant playback, sampled once per tap callback -- drives the voice-session
+    /// "tech orb" (see ConversationView.voiceOrbView). Fired on an audio thread, same
+    /// as `onCapturedChunk`; callers must hop back to the main actor before touching
+    /// UI-facing state.
+    var onInputLevel: ((Float) -> Void)?
+    var onOutputLevel: ((Float) -> Void)?
 
     func start() throws {
         let session = AVAudioSession.sharedInstance()
@@ -44,6 +51,12 @@ final class AudioIOManager {
 
         input.installTap(onBus: 0, bufferSize: 2048, format: hardwareFormat) { [weak self] buffer, _ in
             self?.convertAndEmit(buffer)
+            self?.emitLevel(buffer, to: self?.onInputLevel)
+        }
+        // Separate tap on the mixer output (not the player node directly) so this picks
+        // up whatever's actually audible, same signal the speaker gets.
+        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
+            self?.emitLevel(buffer, to: self?.onOutputLevel)
         }
 
         engine.prepare()
@@ -53,6 +66,7 @@ final class AudioIOManager {
 
     func stop() {
         engine.inputNode.removeTap(onBus: 0)
+        engine.mainMixerNode.removeTap(onBus: 0)
         playerNode.stop()
         engine.stop()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -78,6 +92,15 @@ final class AudioIOManager {
     func interruptPlayback() {
         playerNode.stop()
         playerNode.play()
+    }
+
+    private func emitLevel(_ buffer: AVAudioPCMBuffer, to callback: ((Float) -> Void)?) {
+        guard let callback, let data = buffer.floatChannelData?[0] else { return }
+        let frameLength = Int(buffer.frameLength)
+        guard frameLength > 0 else { return }
+        var sum: Float = 0
+        for i in 0..<frameLength { sum += data[i] * data[i] }
+        callback(sqrt(sum / Float(frameLength)))
     }
 
     private func convertAndEmit(_ buffer: AVAudioPCMBuffer) {

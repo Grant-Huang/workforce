@@ -25,6 +25,8 @@ const stopIcon = document.getElementById("stopIcon");
 const composerRow = document.getElementById("composerRow");
 const textForm = document.getElementById("textForm");
 const textInput = document.getElementById("textInput");
+const voiceOrbContainer = document.getElementById("voiceOrbContainer");
+const voiceOrb = document.getElementById("voiceOrb");
 
 const STATE = { IDLE: "idle", CONNECTING: "connecting", LISTENING: "listening", SPEAKING: "speaking" };
 let state = STATE.IDLE;
@@ -38,6 +40,9 @@ let playElement = null; // <audio> element playback is routed through, for echo 
 let processorNode = null;
 let nextPlayTime = 0;
 let activeSources = [];
+let micAnalyser = null; // taps the mic capture graph, read while LISTENING -- see updateVoiceOrb()
+let playAnalyser = null; // taps the playback graph, read while SPEAKING -- see updateVoiceOrb()
+let orbAnimationId = null;
 let assistantBubbleEl = null;
 let assistantHasDelta = false;
 let voice = "Serena";
@@ -103,6 +108,13 @@ function setState(next, statusOverride) {
 
   renderDictationUI(); // keep the dictate button's enabled state in sync (can't run both mics at once)
 
+  // Transcript is hidden behind the tech orb for the whole time the voice session is
+  // connected (not just while actually listening/speaking) -- docs/app-design.md 8.3.
+  // It's still being recorded into chatEl in real time underneath; this only toggles
+  // which one is visible, so nothing about the history data model changes.
+  if (next === STATE.IDLE) stopVoiceOrb();
+  else startVoiceOrb();
+
   if (next !== STATE.CONNECTING && connectTimeoutId) {
     clearTimeout(connectTimeoutId);
     connectTimeoutId = null;
@@ -119,7 +131,31 @@ function addBubble(role, text) {
   row.appendChild(bubble);
   chatEl.appendChild(row);
   chatEl.scrollTop = chatEl.scrollHeight;
+  // User bubbles are always created with their full, final text in one call (unlike
+  // assistant bubbles, which start empty and get filled in via appendToAssistantBubble/
+  // setAssistantFinalText as deltas stream in) -- so this one spot covers every
+  // user-turn source (voice transcript, typed, dictation) for both local history and
+  // (via ConversationHistory.add(), see history.js) the AgentNexus push. The matching
+  // assistant-turn persistence+push lives in finalizeAssistantTurn(), once the full
+  // reply text is actually known.
+  if (role === "user" && text) ConversationHistory.add("user", text);
   return bubble;
+}
+
+// Called once an assistant reply is actually complete (response.done) -- captures the
+// full accumulated text before assistantBubbleEl gets reset, persists it locally and
+// pushes it to AgentNexus (docs/app-design.md 8.4: previously only the user's half of
+// the conversation was pushed/stored anywhere at all). Deliberately not called on
+// barge-in (input_audio_buffer.speech_started) -- that's an interrupted, incomplete
+// reply, not a finished turn, so it's just discarded same as before, not persisted
+// half-formed.
+function finalizeAssistantTurn() {
+  const text = assistantBubbleEl ? assistantBubbleEl.textContent : "";
+  // ConversationHistory.add() also pushes to AgentNexus (with sync-status tracking +
+  // retry) -- see history.js.
+  if (text) ConversationHistory.add("assistant", text);
+  assistantBubbleEl = null;
+  assistantHasDelta = false;
 }
 
 function appendToAssistantBubble(delta) {
@@ -218,6 +254,11 @@ function setupPlayback() {
     document.body.appendChild(playElement);
   }
   playElement.srcObject = playDestNode.stream;
+
+  // Gives updateVoiceOrb() something to read while SPEAKING -- each chunk's source node
+  // fans out to this in addition to playDestNode, doesn't affect actual playback.
+  playAnalyser = playCtx.createAnalyser();
+  playAnalyser.fftSize = 256;
 }
 
 function playPCM16Chunk(base64) {
@@ -231,6 +272,7 @@ function playPCM16Chunk(base64) {
   const source = playCtx.createBufferSource();
   source.buffer = buffer;
   source.connect(playDestNode);
+  if (playAnalyser) source.connect(playAnalyser);
 
   const startAt = Math.max(nextPlayTime, playCtx.currentTime);
   source.start(startAt);
@@ -240,6 +282,58 @@ function playPCM16Chunk(base64) {
   source.onended = () => {
     activeSources = activeSources.filter((s) => s !== source);
   };
+}
+
+// ---- voice-session "tech orb" (docs/app-design.md 8.3) ----
+//
+// Replaces #chat while the voice session is connected. Light-blue glow that reacts to
+// whichever audio is actually live right now -- the user's mic input while LISTENING,
+// the assistant's playback while SPEAKING -- via the analysers wired up in start()'s
+// mic-capture block and setupPlayback() above. A slow sine-driven "breathing" baseline
+// keeps it visibly alive during CONNECTING or brief silence, instead of going static.
+
+function readAnalyserLevel(analyser) {
+  if (!analyser) return 0;
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(data);
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) sum += data[i];
+  const avg = sum / data.length; // 0-255
+  return Math.min(1, avg / 90); // 90, not 255: normal speech shouldn't need to peak the scale to register
+}
+
+function updateVoiceOrb() {
+  let level = 0;
+  if (state === STATE.LISTENING) level = readAnalyserLevel(micAnalyser);
+  else if (state === STATE.SPEAKING) level = readAnalyserLevel(playAnalyser);
+
+  const breathe = 0.05 * (1 + Math.sin(Date.now() / 900));
+  const scale = 1 + breathe + level * 0.35;
+  const glowSpread = 14 + level * 40;
+  const glowOpacity = 0.35 + level * 0.35;
+
+  voiceOrb.style.transform = `scale(${scale.toFixed(3)})`;
+  voiceOrb.style.boxShadow = `0 0 ${glowSpread.toFixed(0)}px ${(glowSpread / 3).toFixed(0)}px rgba(79, 168, 255, ${glowOpacity.toFixed(2)})`;
+
+  orbAnimationId = requestAnimationFrame(updateVoiceOrb);
+}
+
+function startVoiceOrb() {
+  chatEl.style.display = "none";
+  voiceOrbContainer.style.display = "flex";
+  if (!orbAnimationId) updateVoiceOrb();
+}
+
+function stopVoiceOrb() {
+  voiceOrbContainer.style.display = "none";
+  chatEl.style.display = "";
+  if (orbAnimationId) {
+    cancelAnimationFrame(orbAnimationId);
+    orbAnimationId = null;
+  }
+  voiceOrb.style.transform = "";
+  voiceOrb.style.boxShadow = "";
+  chatEl.scrollTop = chatEl.scrollHeight; // reveal the just-finished turn at the bottom
 }
 
 function stopPlayback() {
@@ -356,15 +450,22 @@ const textSession = { getWs: () => textWs, updater: textUpdater };
  * just needs to briefly confirm rather than search-and-answer.
  */
 async function handleUserTurn(text, session) {
+  // Pushing this turn to AgentNexus (with sync-status tracking + retry) is handled by
+  // ConversationHistory.add(), triggered from addBubble("user", ...) at every call site
+  // right before this function runs -- not duplicated here.
   const saveIntent = SaveIntent.detect(text);
-  AgentNexusBridge.pushMessage(text, "user");
 
   if (saveIntent) {
-    LocalMemory.add(saveIntent.content, { source: "agentnexus", layer: "PROGRESS" });
+    // source defaults to "local" here (not "agentnexus") -- honestly reflects "not yet
+    // confirmed synced" until createMemoryEntry below actually succeeds, per
+    // docs/roadmap-todo.md's "记忆" section item 3. "过户" to agentnexus + the real
+    // sourceId happens via markSynced once that's confirmed, not assumed up front.
+    const localEntry = LocalMemory.add(saveIntent.content, { layer: "PROGRESS" });
     try {
-      await AgentNexusBridge.createMemoryEntry("PROGRESS", saveIntent.content);
+      const created = await AgentNexusBridge.createMemoryEntry("PROGRESS", saveIntent.content);
+      if (localEntry) LocalMemory.markSynced(localEntry.id, { source: "agentnexus", sourceId: created.entry_id });
     } catch (e) {
-      console.warn("save-intent write to AgentNexus failed (stayed local only):", e);
+      console.warn("save-intent write to AgentNexus failed (stayed local only, source stays \"local\" for a retry later):", e);
     }
     const instructions = `${BASE_INSTRUCTIONS}\n\n用户刚才明确要求记住这件事："${saveIntent.content}"，你已经帮TA记下了。只需要简短确认一句就行，不要复述内容、不要追问。`;
     await session.updater.updateInstructionsAndWait(instructions);
@@ -423,8 +524,7 @@ function handleServerEvent(json) {
       setState(STATE.LISTENING);
       break;
     case "response.done":
-      assistantBubbleEl = null;
-      assistantHasDelta = false;
+      finalizeAssistantTurn();
       if (state !== STATE.IDLE) setState(STATE.LISTENING);
       break;
     case "error":
@@ -449,6 +549,7 @@ async function start() {
     // Pull-sync from AgentNexus before the conversation starts — bounded by the
     // fetch itself; on failure we just proceed with whatever's in local cache.
     await AgentNexusBridge.pullMemory();
+    ConversationHistory.retryUnsynced();
 
     try {
       micStream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
@@ -476,6 +577,12 @@ async function start() {
       source.connect(processorNode);
       processorNode.connect(silentGain);
       silentGain.connect(captureCtx.destination);
+
+      // Fan the same mic source out to an analyser too -- doesn't affect the capture
+      // pipeline above, just gives updateVoiceOrb() something to read while LISTENING.
+      micAnalyser = captureCtx.createAnalyser();
+      micAnalyser.fftSize = 256;
+      source.connect(micAnalyser);
     }
 
     lastConnErrorMessage = null;
@@ -552,8 +659,8 @@ async function start() {
       // whatever we grabbed before attempting the connection and go back to idle so
       // the user can retry instead of being stuck mid-"连接中…".
       if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
-      if (captureCtx) { captureCtx.close(); captureCtx = null; }
-      if (playCtx) { playCtx.close(); playCtx = null; playDestNode = null; if (playElement) playElement.srcObject = null; }
+      if (captureCtx) { captureCtx.close(); captureCtx = null; micAnalyser = null; }
+      if (playCtx) { playCtx.close(); playCtx = null; playDestNode = null; playAnalyser = null; if (playElement) playElement.srcObject = null; }
       ws = null;
       setState(STATE.IDLE, lastConnErrorMessage || "连接失败，请稍后重试");
     }
@@ -584,12 +691,14 @@ function stop(reason) {
   if (captureCtx) {
     captureCtx.close();
     captureCtx = null;
+    micAnalyser = null;
   }
   stopPlayback();
   if (playCtx) {
     playCtx.close();
     playCtx = null;
     playDestNode = null;
+    playAnalyser = null;
     if (playElement) playElement.srcObject = null;
   }
   if (micStream) {
@@ -661,8 +770,7 @@ function handleTextSessionEvent(json) {
       setAssistantFinalText(json.text || "");
       break;
     case "response.done":
-      assistantBubbleEl = null;
-      assistantHasDelta = false;
+      finalizeAssistantTurn();
       break;
     case "error":
       statusEl.textContent = `出错：${json.error?.message || "unknown"}`;
@@ -683,6 +791,7 @@ async function startTextSession() {
   textStartPromise = (async () => {
     setTextState(TEXT_STATE.CONNECTING);
     await AgentNexusBridge.pullMemory();
+    ConversationHistory.retryUnsynced();
 
     textLastConnErrorMessage = null;
     await new Promise((resolveOpen) => {
@@ -990,6 +1099,7 @@ async function promoteDictationConnectionToTextSession() {
   // (empty vs BASE_INSTRUCTIONS) -- so this one-field patch is all promoting it needs.
   await textUpdater.updateInstructionsAndWait(BASE_INSTRUCTIONS);
   await pullMemoryPromise;
+  ConversationHistory.retryUnsynced();
   setTextState(TEXT_STATE.READY);
 }
 
@@ -1152,5 +1262,8 @@ setState(STATE.IDLE);
 // one sat idle in the background" without needing to poll on a timer (docs/roadmap-todo.md,
 // "拉取时机加一条 app 回到前台时也拉一次").
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") AgentNexusBridge.pullMemory();
+  if (document.visibilityState === "visible") {
+    AgentNexusBridge.pullMemory();
+    ConversationHistory.retryUnsynced();
+  }
 });

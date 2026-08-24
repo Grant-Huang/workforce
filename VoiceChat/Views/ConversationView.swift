@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 struct ConversationView: View {
     @StateObject private var viewModel = ConversationViewModel()
@@ -11,7 +12,14 @@ struct ConversationView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
-                if viewModel.transcript.isEmpty {
+                // Transcript is replaced by the tech orb for the whole time the voice
+                // session is connected (docs/app-design.md 8.3) -- !isIdle covers
+                // connecting/listening/assistantSpeaking but not .error, so an error
+                // still surfaces the transcript (with the message in statusLabel below)
+                // rather than getting hidden behind the orb.
+                if !viewModel.isIdle {
+                    voiceOrbView
+                } else if viewModel.transcript.isEmpty {
                     emptyStateView
                 } else {
                     transcriptList
@@ -84,6 +92,45 @@ struct ConversationView: View {
     // ChatGPT's accent teal (docs/app-design.md section 1) -- matches web-demo's
     // --user-bubble CSS variable exactly, so the two platforms read as the same product.
     private static let chatGPTGreen = Color(red: 16.0 / 255, green: 163.0 / 255, blue: 127.0 / 255)
+
+    // Light-blue "tech orb" palette, matching web-demo's radial-gradient (docs/app-design.md 8.3).
+    private static let orbCore = Color(red: 0.84, green: 0.94, blue: 1.0)
+    private static let orbMid = Color(red: 0.42, green: 0.72, blue: 1.0)
+    private static let orbEdge = Color(red: 0.18, green: 0.5, blue: 0.88)
+    private static let orbGlow = Color(red: 0.31, green: 0.66, blue: 1.0)
+
+    /// Ported from web-demo/static/app.js's updateVoiceOrb(): a sine-driven "breathing"
+    /// baseline (so the orb isn't static during CONNECTING or brief silence) blended
+    /// with `viewModel.orbLevel` (mic RMS while listening, playback RMS while speaking).
+    /// `TimelineView(.animation)` supplies a continuously-advancing time reference for
+    /// the breathing term without a separate Timer. The RMS-to-visual-intensity scaling
+    /// factor (6x here) is a guess carried over unverified from the web port -- iOS
+    /// input/output levels haven't been measured on a real device, so this may need
+    /// retuning once someone can actually watch it react to real speech.
+    private var voiceOrbView: some View {
+        TimelineView(.animation) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let breathe = 0.05 * (1 + sin(t / 0.9))
+            let level = min(1, viewModel.orbLevel * 6)
+            let scale = 1 + breathe + level * 0.35
+            let glowRadius = 20 + level * 40
+            let glowOpacity = 0.35 + level * 0.35
+
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [Self.orbCore, Self.orbMid, Self.orbEdge],
+                        center: UnitPoint(x: 0.35, y: 0.32),
+                        startRadius: 2,
+                        endRadius: 90
+                    )
+                )
+                .frame(width: 140, height: 140)
+                .scaleEffect(CGFloat(scale))
+                .shadow(color: Self.orbGlow.opacity(glowOpacity), radius: CGFloat(glowRadius))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 
     private func bubble(for line: TranscriptLine) -> some View {
         HStack {

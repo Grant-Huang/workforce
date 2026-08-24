@@ -276,3 +276,22 @@ body {
   0%, 100% { box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12); }
   50% { box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12), 0 0 0 8px rgba(229, 72, 77, 0.15); }
 }
+
+/* Voice-session "tech orb" (docs/app-design.md 8.3) -- replaces the transcript view
+   while the voice session is active. transform/box-shadow are driven entirely from JS
+   (see updateVoiceOrb() in app.js) so the audio-reactive scale and the idle "breathing"
+   baseline don't fight over the same CSS properties via a separate @keyframes rule. */
+.voiceOrbContainer {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.voiceOrb {
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 32%, #d6f0ff, #6ab8ff 55%, #2f7fe0 100%);
+  will-change: transform, box-shadow;
+}
