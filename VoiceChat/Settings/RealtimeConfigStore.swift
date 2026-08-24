@@ -69,7 +69,7 @@ enum RealtimeConfigStore {
     /// above); otherwise falls back to whatever `baseURL` holds (shared domain by
     /// default, or anything the user typed in Settings, e.g. an OpenAI endpoint).
     static var effectiveBaseURL: String {
-        let id = workspaceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let id = sanitizedWorkspaceId(workspaceId)
         guard !id.isEmpty else { return baseURL }
         return effectiveWorkspaceURL(for: id)
     }
@@ -77,17 +77,33 @@ enum RealtimeConfigStore {
     /// Same derivation as `effectiveBaseURL`, but for a not-yet-saved ID string — lets
     /// Settings preview the resulting URL as the user types, before hitting Save.
     static func effectiveWorkspaceURL(for workspaceId: String) -> String {
-        "wss://\(workspaceId.trimmingCharacters(in: .whitespacesAndNewlines)).cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime"
+        "wss://\(sanitizedWorkspaceId(workspaceId)).cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime"
     }
 
     /// Compatible-mode (plain HTTPS text completions, not the Realtime WS) base URL —
     /// used only by `DictationCleanupClient`. Same workspace-domain-when-set,
     /// shared-domain-fallback pattern as `effectiveBaseURL`.
     static var effectiveCompatibleModeBaseURL: String {
-        let id = workspaceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let id = sanitizedWorkspaceId(workspaceId)
         if !id.isEmpty {
             return "https://\(id).cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
         }
         return "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    }
+
+    /// Real-world bug, not hypothetical (2026-08-24): a user's pasted workspace ID
+    /// carried a stray trailing backtick into the URL (` wss://llm-xxxx`.cn-beijing...`),
+    /// almost certainly picked up from copying the ID out of somewhere it was wrapped in
+    /// Markdown inline-code backticks (a doc, a chat message) and only one side coming
+    /// along. `workspaceId` is free-typed/pasted in Settings, so beyond whitespace,
+    /// strip the handful of characters that are never legitimately part of an
+    /// alphanumeric workspace ID but are exactly what a copy-paste from formatted text
+    /// leaves behind: backticks and straight/curly quotes.
+    private static func sanitizedWorkspaceId(_ raw: String) -> String {
+        let strayCharacters = CharacterSet(charactersIn: "`'\"\u{2018}\u{2019}\u{201C}\u{201D}")
+        return raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: strayCharacters)
+            .joined()
     }
 }
