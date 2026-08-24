@@ -695,11 +695,20 @@ async function start() {
         // single bump based on one report, not a scientifically chosen value; may need
         // another round if 0.65 turns out to be too high (real speech gets missed) or
         // still too low (still over-triggers).
+        //
+        // silence_duration_ms raised from the default 500 to 800 on 2026-08-24 -- a
+        // separate real-device report: the assistant would start replying to a fragment
+        // ("我想问一下...") before the user actually finished the sentence, read as the
+        // assistant interrupting the user. 500ms of silence is short relative to normal
+        // mid-sentence pauses (thinking, breathing) -- 800ms gives more room before the
+        // server decides the turn is over. Same "one report, not scientifically tuned"
+        // caveat as threshold above; may need further adjustment (800ms could itself
+        // start to feel laggy for people who pause less).
         turn_detection: {
           type: "server_vad",
           threshold: 0.65,
           prefix_padding_ms: 300,
-          silence_duration_ms: 500,
+          silence_duration_ms: 800,
           create_response: false,
         },
       });

@@ -46,7 +46,12 @@ enum RealtimeOutgoingEvent {
                 // bump based on one web-side report, not a scientifically chosen value.
                 "threshold": 0.65,
                 "prefix_padding_ms": 300,
-                "silence_duration_ms": 500,
+                // Raised from 500 to 800 on 2026-08-24, same parity reasoning as
+                // threshold above -- real-device testing on the web port found the
+                // assistant replying to a fragment before the user actually finished
+                // speaking (500ms of silence is short relative to normal mid-sentence
+                // pauses). Not device-tested on iOS yet.
+                "silence_duration_ms": 800,
                 "create_response": autoRespond,
             ]
         } else {
