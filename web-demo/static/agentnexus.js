@@ -52,13 +52,21 @@ const AgentNexusBridge = (() => {
     }
   }
 
-  /** Fire-and-forget push of a raw conversation turn as a channel message. */
-  function pushMessage(text, senderType = "user") {
-    fetch(`${config.baseURL}/api/v1/channels/${config.channelId}/messages`, {
+  /**
+   * Pushes a raw conversation turn as a channel message. Used to be fire-and-forget
+   * (swallowed its own errors) -- now throws on failure so callers can track sync
+   * status and retry, instead of a failed push silently vanishing with no local trace
+   * (docs/roadmap-todo.md, "记忆" section, item 4). See history.js's ConversationHistory,
+   * the only caller, for the retry side of this.
+   */
+  async function pushMessage(text, senderType = "user") {
+    const res = await fetch(`${config.baseURL}/api/v1/channels/${config.channelId}/messages`, {
       method: "POST",
       headers: headers(),
       body: JSON.stringify({ content: text, sender_type: senderType }),
-    }).catch((e) => console.warn("AgentNexus push failed (will just stay local for now):", e));
+    });
+    if (!res.ok) throw new Error(`push failed: ${res.status}`);
+    return res.json();
   }
 
   /**

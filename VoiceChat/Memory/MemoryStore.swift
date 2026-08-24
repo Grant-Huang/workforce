@@ -79,11 +79,29 @@ final class MemoryStore {
     /// Appends a new memory entry. Ignores blank/very short transcripts (noise, filler sounds).
     /// Always `source: .local` -- this is content produced on this device, not pulled from
     /// anywhere. See MemorySource.local's doc comment for what that implies about sync status.
-    func add(_ text: String) {
+    /// Returns the created entry (nil if too short to store) so a caller that goes on to
+    /// push it to AgentNexus can call `markSynced` on the right one once that's confirmed.
+    @discardableResult
+    func add(_ text: String) -> MemoryEntry? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= 2 else { return }
+        guard trimmed.count >= 2 else { return nil }
+        let entry = MemoryEntry(text: trimmed, source: MemorySource.local)
         queue.sync {
-            entries.append(MemoryEntry(text: trimmed, source: MemorySource.local))
+            entries.append(entry)
+            persist()
+        }
+        return entry
+    }
+
+    /// "过户" a locally-produced entry to its now-confirmed AgentNexus identity, once a
+    /// create call for it has actually succeeded (docs/roadmap-todo.md, "记忆" section,
+    /// item 3) -- before this point the entry stays `source: .local`, honestly
+    /// reflecting "not yet confirmed synced" rather than assuming success up front.
+    func markSynced(id: UUID, source: String, sourceId: String) {
+        queue.sync {
+            guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+            entries[index].source = source
+            entries[index].sourceId = sourceId
             persist()
         }
     }
@@ -92,21 +110,31 @@ final class MemoryStore {
         queue.sync { entries.sorted { $0.timestamp > $1.timestamp } }
     }
 
-    /// Merges entries pulled from AgentNexus, skipping any whose text already exists
-    /// locally — cheap enough at personal-memory scale, and avoids re-adding the same
-    /// AgentNexus content on every app launch without needing a separate persisted
-    /// "already merged" id set.
-    ///
-    /// Phase 1 scope note (docs/roadmap-todo.md): this only adds the `sourceId` field to
-    /// what gets stored -- the text-based dedup logic itself is unchanged here on purpose.
-    /// Phase 2 is what replaces this with a real upsert keyed on (source, sourceId); doing
-    /// that here too would be scope creep past what this pass is for.
+    /// Reconciles the local `source: .agentNexus` subset against a fresh pull, keyed on
+    /// `sourceId` (docs/roadmap-todo.md, "记忆" section, items 1+2): entries missing from
+    /// `remoteEntries` are dropped (deleted upstream, or otherwise no longer current) --
+    /// a full replace of that subset rather than tracking deletions one by one, since
+    /// the whole point of caching AgentNexus's memory locally is that it's a disposable,
+    /// rebuildable mirror. An entry present in both is only overwritten when the pulled
+    /// copy is at least as new (by `timestamp`, which for agentNexus-sourced entries is
+    /// already the source's own `updated_at` -- see `ConversationViewModel.pullMemoryInBackground`)
+    /// -- guards against an out-of-order/late-arriving pull response clobbering
+    /// something a more recent pull already updated. `source: .local`/`.unknown`
+    /// entries are a completely different lifecycle (this device's own not-yet-synced
+    /// content, or pre-Phase-1 data of unknown provenance) and this never touches them.
     func merge(remoteEntries: [(text: String, timestamp: Date, sourceId: String)]) {
         queue.sync {
-            let existingTexts = Set(entries.map(\.text))
-            for entry in remoteEntries where !existingTexts.contains(entry.text) {
-                entries.append(MemoryEntry(timestamp: entry.timestamp, text: entry.text, source: MemorySource.agentNexus, sourceId: entry.sourceId))
+            var existingBySourceId: [String: MemoryEntry] = [:]
+            for entry in entries where entry.source == MemorySource.agentNexus {
+                if let sourceId = entry.sourceId { existingBySourceId[sourceId] = entry }
             }
+            let reconciled: [MemoryEntry] = remoteEntries.map { remote in
+                if let existing = existingBySourceId[remote.sourceId], existing.timestamp >= remote.timestamp {
+                    return existing
+                }
+                return MemoryEntry(timestamp: remote.timestamp, text: remote.text, source: MemorySource.agentNexus, sourceId: remote.sourceId)
+            }
+            entries = entries.filter { $0.source != MemorySource.agentNexus } + reconciled
             persist()
         }
     }

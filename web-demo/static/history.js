@@ -6,6 +6,15 @@
 // before this, only the user's half got pushed to AgentNexus, fire-and-forget, and the
 // assistant's replies + the full conversation structure weren't persisted anywhere).
 //
+// Also owns pushing each turn to AgentNexus (previously a separate, truly
+// fire-and-forget AgentNexusBridge.pushMessage call at each call site) and tracking
+// whether that push actually succeeded -- docs/roadmap-todo.md, "记忆" section, item 4:
+// a failed push used to leave no trace at all, so that turn would just never show up in
+// AgentNexus with nothing locally aware it hadn't. `synced` records that per turn;
+// `retryUnsynced()` re-attempts anything still unconfirmed, called alongside the
+// existing pull-sync moments (app/tab start and foreground -- see app.js) since those
+// are already "we likely have network, worth checking in" moments.
+//
 // Deliberately no search, no dedup, no cap yet -- see roadmap-todo.md's "原始对话记录
 // 加滚动窗口裁剪" item, intentionally sequenced after this.
 const ConversationHistory = (() => {
@@ -30,13 +39,36 @@ const ConversationHistory = (() => {
 
   let turns = load();
 
+  async function pushOne(turn) {
+    try {
+      await AgentNexusBridge.pushMessage(turn.text, turn.speaker);
+      turn.synced = true;
+      persist(turns);
+    } catch (e) {
+      // Stays unsynced (or missing the flag entirely on entries persisted before this
+      // field existed, which is equally falsy) -- retryUnsynced() will try again later.
+      console.warn("AgentNexus push failed, will retry on next sync opportunity:", e);
+    }
+  }
+
   return {
     /** @param {"user"|"assistant"} speaker */
     add(speaker, text) {
       const trimmed = (text || "").trim();
-      if (!trimmed) return;
-      turns.push({ speaker, text: trimmed, timestamp: Date.now() });
+      if (!trimmed) return undefined;
+      const turn = { speaker, text: trimmed, timestamp: Date.now(), synced: false };
+      turns.push(turn);
       persist(turns);
+      pushOne(turn);
+      return turn;
+    },
+
+    /** Re-attempts pushing every turn not yet confirmed synced. Fire-and-forget, like
+     * the pull-sync calls it's meant to ride alongside. */
+    retryUnsynced() {
+      for (const turn of turns) {
+        if (!turn.synced) pushOne(turn);
+      }
     },
 
     all() {

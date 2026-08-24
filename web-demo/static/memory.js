@@ -62,25 +62,57 @@ const LocalMemory = (() => {
      *   Defaults to source: "local" (see MemorySource.LOCAL) when the caller doesn't
      *   specify one -- every raw dialogue turn stored via a bare `add(text)` call is
      *   produced on this device, so that default is correct, not a placeholder.
+     * @returns the created entry (or undefined if the text was too short to store) --
+     *   callers that go on to push this content to AgentNexus need the entry's `id`
+     *   back so they can call `markSynced` on the right one once the push confirms.
      */
     add(text, meta = {}) {
       const trimmed = (text || "").trim();
-      if (trimmed.length < 2) return;
-      entries.push({ id: crypto.randomUUID(), text: trimmed, timestamp: Date.now(), source: MemorySource.LOCAL, ...meta });
+      if (trimmed.length < 2) return undefined;
+      const entry = { id: crypto.randomUUID(), text: trimmed, timestamp: Date.now(), source: MemorySource.LOCAL, ...meta };
+      entries.push(entry);
+      persist(entries);
+      return entry;
+    },
+
+    /**
+     * "过户" a locally-produced entry to its now-confirmed AgentNexus identity, once a
+     * push/create call for it has actually succeeded (docs/roadmap-todo.md, "记忆"
+     * section, item 3) -- before this point the entry stays `source: "local"`, honestly
+     * reflecting "not yet confirmed synced" rather than assuming success up front.
+     */
+    markSynced(id, { source, sourceId }) {
+      const entry = entries.find((e) => e.id === id);
+      if (!entry) return;
+      entry.source = source;
+      entry.sourceId = sourceId;
       persist(entries);
     },
 
     /**
-     * Bulk-merge entries pulled from AgentNexus without duplicating by id.
-     * Phase 1 scope note (docs/roadmap-todo.md): this only stores the `sourceId` field
-     * callers now pass in -- the dedup-by-`id` logic itself is unchanged on purpose.
-     * Phase 2 is what replaces this with a real upsert keyed on (source, sourceId).
+     * Reconciles the local `source: "agentnexus"` subset against a fresh pull, keyed on
+     * `sourceId` (docs/roadmap-todo.md, "记忆" section, items 1+2): entries missing from
+     * `remoteEntries` are dropped (deleted upstream, or otherwise no longer current) --
+     * a full replace of that subset rather than tracking deletions one by one, since the
+     * whole point of caching AgentNexus's memory locally is that it's a disposable,
+     * rebuildable mirror. An entry present in both is only overwritten when the pulled
+     * copy is at least as new (by `timestamp`, which for agentnexus-sourced entries is
+     * already the source's own `updated_at` -- see agentnexus.js's pullMemory) --
+     * guards against an out-of-order/late-arriving pull response clobbering something a
+     * more recent pull already updated. `source: "local"`/`"unknown"` entries are a
+     * completely different lifecycle (this device's own not-yet-synced content, or
+     * pre-Phase-1 data of unknown provenance) and this never touches them.
      */
     merge(remoteEntries) {
-      const existingIds = new Set(entries.map((e) => e.id));
-      for (const e of remoteEntries) {
-        if (!existingIds.has(e.id)) entries.push(e);
-      }
+      const existingBySourceId = new Map(
+        entries.filter((e) => e.source === MemorySource.AGENTNEXUS && e.sourceId != null).map((e) => [e.sourceId, e])
+      );
+      const reconciled = remoteEntries.map((remote) => {
+        const existing = existingBySourceId.get(remote.sourceId);
+        if (existing && existing.timestamp >= remote.timestamp) return existing;
+        return { id: remote.id, text: remote.text, timestamp: remote.timestamp, source: MemorySource.AGENTNEXUS, sourceId: remote.sourceId, layer: remote.layer };
+      });
+      entries = [...entries.filter((e) => e.source !== MemorySource.AGENTNEXUS), ...reconciled];
       persist(entries);
     },
 
