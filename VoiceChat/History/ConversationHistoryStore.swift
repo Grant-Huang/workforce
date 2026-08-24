@@ -34,13 +34,24 @@ struct ConversationTurn: Codable, Identifiable {
 /// `ConversationViewModel.pullMemoryInBackground()` alongside the existing pull-sync
 /// (already a "we likely have network, worth checking in" moment).
 ///
-/// Deliberately no search, no dedup, no cap yet — see roadmap-todo.md's "原始对话记录
-/// 加滚动窗口裁剪" item, intentionally sequenced after this. Mirrors web-demo's history.js.
+/// Deliberately no search, no dedup yet. Does have a rolling-window trim (see
+/// `trimIfNeeded`) — roadmap-todo.md's "原始对话记录加滚动窗口裁剪" item. Mirrors
+/// web-demo's history.js.
 final class ConversationHistoryStore {
     private let fileURL: URL
     private var turns: [ConversationTurn] = []
     private let queue = DispatchQueue(label: "com.jacer.voicechat.conversationhistorystore")
     private let agentNexusClient: AgentNexusClient
+
+    // "最近 N 条或最近 M 天，取较大者" (roadmap-todo.md): a turn survives a trim if
+    // it's among the most recent maxEntries, OR it's within the last maxAgeDays -- the
+    // union of both windows, not the intersection, so neither a quiet stretch (drops
+    // below the count window) nor a single very active day (drops below the age
+    // window) gets trimmed more aggressively than the other window alone would allow.
+    // Same numbers as web-demo's history.js, a first-pass judgment call (the design
+    // discussion left them "TBD"), not a measured/requested value.
+    private static let maxEntries = 500
+    private static let maxAgeSeconds: TimeInterval = 30 * 24 * 60 * 60
 
     init(fileName: String = "conversationHistory.json", agentNexusClient: AgentNexusClient) {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -57,10 +68,19 @@ final class ConversationHistoryStore {
         let turn = ConversationTurn(speaker: speaker, text: trimmed)
         queue.sync {
             turns.append(turn)
+            trimIfNeeded()
             persist()
         }
         Task { [weak self] in await self?.pushAndMarkSynced(turn) }
         return turn
+    }
+
+    /// Must be called while already holding `queue` (matches `persist()`'s convention).
+    private func trimIfNeeded() {
+        guard turns.count > Self.maxEntries else { return } // under the count window -- the age window can only keep more, nothing to do
+        let cutoffDate = Date().addingTimeInterval(-Self.maxAgeSeconds)
+        let recentByCount = Set(turns.suffix(Self.maxEntries).map(\.id))
+        turns = turns.filter { recentByCount.contains($0.id) || $0.timestamp >= cutoffDate }
     }
 
     /// Re-attempts pushing every turn not yet confirmed synced. Fire-and-forget, like

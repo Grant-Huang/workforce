@@ -15,10 +15,24 @@
 // existing pull-sync moments (app/tab start and foreground -- see app.js) since those
 // are already "we likely have network, worth checking in" moments.
 //
-// Deliberately no search, no dedup, no cap yet -- see roadmap-todo.md's "原始对话记录
-// 加滚动窗口裁剪" item, intentionally sequenced after this.
+// Deliberately no search, no dedup yet. Does have a rolling-window trim (below) --
+// see roadmap-todo.md's "原始对话记录加滚动窗口裁剪" item.
 const ConversationHistory = (() => {
   const STORAGE_KEY = "voicechat.conversationHistory.v1";
+
+  // "最近 N 条或最近 M 天，取较大者" (roadmap-todo.md): a turn survives a trim if it's
+  // among the most recent MAX_ENTRIES, OR it's within the last MAX_AGE_DAYS -- the
+  // union of both windows, not the intersection, so neither a quiet week (drops below
+  // the count window) nor a single very active day (drops below the age window) gets
+  // trimmed more aggressively than the other window alone would allow. Specific numbers
+  // are a first-pass judgment call (the design discussion left them "TBD"), not a
+  // measured/requested value -- easy to retune once there's a sense of real growth
+  // rate. Deliberately sequenced after memory extraction landed (see roadmap-todo.md):
+  // extraction doesn't touch this store, but the local cache's overall growth rate
+  // matters for picking these numbers, and extraction changes it going forward.
+  const MAX_ENTRIES = 500;
+  const MAX_AGE_DAYS = 30;
+  const MAX_AGE_MS = MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
 
   function load() {
     try {
@@ -39,6 +53,13 @@ const ConversationHistory = (() => {
 
   let turns = load();
 
+  function trim(list) {
+    if (list.length <= MAX_ENTRIES) return list; // under the count window -- the age window can only keep more, nothing to do
+    const cutoffTime = Date.now() - MAX_AGE_MS;
+    const recentByCount = new Set(list.slice(-MAX_ENTRIES));
+    return list.filter((t) => recentByCount.has(t) || t.timestamp >= cutoffTime);
+  }
+
   async function pushOne(turn) {
     try {
       await AgentNexusBridge.pushMessage(turn.text, turn.speaker);
@@ -58,6 +79,7 @@ const ConversationHistory = (() => {
       if (!trimmed) return undefined;
       const turn = { speaker, text: trimmed, timestamp: Date.now(), synced: false };
       turns.push(turn);
+      turns = trim(turns);
       persist(turns);
       pushOne(turn);
       return turn;

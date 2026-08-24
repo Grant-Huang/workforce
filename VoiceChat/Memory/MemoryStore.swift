@@ -28,22 +28,31 @@ struct MemoryEntry: Identifiable, Codable, Equatable {
     /// This entry's native id within `source` (e.g. AgentNexus's `entry_id`). `nil` for
     /// entries with no such id yet -- `source == .local` entries before they're synced.
     var sourceId: String?
+    /// True for a fact extracted by `MemoryExtractionClient` that explains a personal/
+    /// team jargon term (docs/app-design.md 7.2/7.3, roadmap-todo.md's "黑话词典与记忆
+    /// 提炼" section) -- these are the ones that get "过户"'d into AgentNexus, and are
+    /// what gets fed back into future extraction calls as "already-known jargon" so the
+    /// same term isn't re-extracted every time it comes up. Plain (non-jargon)
+    /// extracted facts leave this false and stay local-only search fragments.
+    var isJargon: Bool
 
-    init(id: UUID = UUID(), timestamp: Date = Date(), text: String, source: String = MemorySource.local, sourceId: String? = nil) {
+    init(id: UUID = UUID(), timestamp: Date = Date(), text: String, source: String = MemorySource.local, sourceId: String? = nil, isJargon: Bool = false) {
         self.id = id
         self.timestamp = timestamp
         self.text = text
         self.source = source
         self.sourceId = sourceId
+        self.isJargon = isJargon
     }
 
     // Custom decoding only -- encoding stays synthesized. Existing memory.json files
-    // predate `source`/`sourceId` entirely; decoding them with the synthesized
-    // Decodable (which would require both keys) would throw, and MemoryStore.load()'s
-    // `try?` would then silently discard every existing entry on first launch after
-    // this update. decodeIfPresent + a default keeps old data intact instead.
+    // predate `source`/`sourceId`/`isJargon` entirely; decoding them with the
+    // synthesized Decodable (which would require all keys) would throw, and
+    // MemoryStore.load()'s `try?` would then silently discard every existing entry on
+    // first launch after this update. decodeIfPresent + a default keeps old data intact
+    // instead.
     enum CodingKeys: String, CodingKey {
-        case id, timestamp, text, source, sourceId
+        case id, timestamp, text, source, sourceId, isJargon
     }
 
     init(from decoder: Decoder) throws {
@@ -53,6 +62,7 @@ struct MemoryEntry: Identifiable, Codable, Equatable {
         text = try container.decode(String.self, forKey: .text)
         source = try container.decodeIfPresent(String.self, forKey: .source) ?? MemorySource.unknown
         sourceId = try container.decodeIfPresent(String.self, forKey: .sourceId)
+        isJargon = try container.decodeIfPresent(Bool.self, forKey: .isJargon) ?? false
     }
 }
 
@@ -82,15 +92,24 @@ final class MemoryStore {
     /// Returns the created entry (nil if too short to store) so a caller that goes on to
     /// push it to AgentNexus can call `markSynced` on the right one once that's confirmed.
     @discardableResult
-    func add(_ text: String) -> MemoryEntry? {
+    func add(_ text: String, isJargon: Bool = false) -> MemoryEntry? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count >= 2 else { return nil }
-        let entry = MemoryEntry(text: trimmed, source: MemorySource.local)
+        let entry = MemoryEntry(text: trimmed, source: MemorySource.local, isJargon: isJargon)
         queue.sync {
             entries.append(entry)
             persist()
         }
         return entry
+    }
+
+    /// Recent jargon-tagged entries' text, fed back into `MemoryExtractionClient.extract`
+    /// as "already-known jargon" so the same term isn't re-extracted every time it comes
+    /// up (docs/app-design.md 7.3). Mirrors web-demo's `LocalMemory.all().filter(isJargon)`.
+    func recentJargonTexts(limit: Int = 20) -> [String] {
+        queue.sync {
+            entries.filter(\.isJargon).sorted { $0.timestamp > $1.timestamp }.prefix(limit).map(\.text)
+        }
     }
 
     /// "过户" a locally-produced entry to its now-confirmed AgentNexus identity, once a
