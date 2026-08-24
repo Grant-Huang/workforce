@@ -113,9 +113,8 @@ final class RealtimeClient: NSObject {
         guard let task, let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
         let message = URLSessionWebSocketTask.Message.data(data)
         task.send(message) { [weak self] error in
-            if let error {
-                self?.onError?("send failed: \(error.localizedDescription)")
-            }
+            guard let self, let error else { return }
+            self.deliver { self.onError?("send failed: \(error.localizedDescription)") }
         }
     }
 
@@ -124,13 +123,26 @@ final class RealtimeClient: NSObject {
             guard let self else { return }
             switch result {
             case .failure(let error):
-                self.onDisconnect?(error)
+                self.deliver { self.onDisconnect?(error) }
                 return
             case .success(let message):
-                self.handle(message)
+                self.deliver { self.handle(message) }
                 self.receiveLoop()
             }
         }
+    }
+
+    /// `URLSessionWebSocketTask`'s receive/send completions fire on URLSession's own
+    /// background delegate queue, not the main thread — every one of this class's
+    /// callbacks used to be invoked directly from there, and every consumer
+    /// (`ConversationViewModel`) mutates `@Published` state in response, which is only
+    /// safe from the main thread. That mismatch was silent (Swift 5 language mode
+    /// doesn't catch it at compile time) but real: it surfaced as SwiftUI's "Publishing
+    /// changes from background threads is not allowed" runtime warning during real-
+    /// device testing (2026-08-24). Routing every callback invocation through here
+    /// fixes it in one place instead of requiring every call site to remember to hop.
+    private func deliver(_ work: @escaping () -> Void) {
+        DispatchQueue.main.async(execute: work)
     }
 
     private func handle(_ message: URLSessionWebSocketTask.Message) {

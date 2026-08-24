@@ -343,17 +343,21 @@ final class ConversationViewModel: ObservableObject {
             self.setState(.listening)
         }
 
+        // Both call stop(reason:) rather than setState(...) directly -- a real bug found
+        // via real-device testing (2026-08-24): setState alone left the socket task and
+        // mic capture alive after a send/receive failure (e.g. "send failed: Socket is
+        // not connected"), so the UI showed an error but the app was actually still
+        // holding a dead connection and an open mic instead of a genuinely idle state
+        // the user could cleanly retry from. stop(reason:) already does the full
+        // teardown (client.disconnect() + audio.stop()) before landing on the same
+        // .error/.idle state setState would have set — matches stopTextSession's
+        // already-correct pattern for the text session's onError/onDisconnect.
         client.onError = { [weak self] message in
-            self?.setState(.error(message))
+            self?.stop(reason: message)
         }
 
         client.onDisconnect = { [weak self] error in
-            guard let self else { return }
-            if let error {
-                self.setState(.error(error.localizedDescription))
-            } else {
-                self.setState(.idle)
-            }
+            self?.stop(reason: error?.localizedDescription)
         }
     }
 
