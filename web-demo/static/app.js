@@ -37,16 +37,11 @@ let captureCtx = null;
 let playCtx = null;
 let playDestNode = null; // MediaStreamAudioDestinationNode -- see setupPlayback()
 let playElement = null; // <audio> element playback is routed through, for echo cancellation
+let playWorkletNode = null; // AudioWorkletNode (pcm-player-worklet.js) -- see setupPlayback()
 let processorNode = null;
-let nextPlayTime = 0;
-let activeSources = [];
 let micAnalyser = null; // taps the mic capture graph, read while LISTENING -- see updateVoiceOrb()
 let playAnalyser = null; // taps the playback graph, read while SPEAKING -- see updateVoiceOrb()
 let orbAnimationId = null;
-// Playback scheduling margin ahead of playCtx.currentTime (see playPCM16Chunk) and the
-// fade applied at each chunk's edges -- both explained where they're used below.
-const PLAYBACK_LOOKAHEAD_SEC = 0.08;
-const CHUNK_FADE_SEC = 0.003;
 let assistantBubbleEl = null;
 let assistantHasDelta = false;
 let voice = "Serena";
@@ -229,7 +224,7 @@ function base64ToInt16(base64) {
   return new Int16Array(bytes.buffer);
 }
 
-// ---- playback: schedule streamed 24kHz PCM16 chunks back-to-back for gapless audio ----
+// ---- playback: stream 24kHz PCM16 chunks through a continuous AudioWorklet ----
 //
 // Playback is deliberately routed through a MediaStreamAudioDestinationNode -> a hidden
 // <audio> element, not connected directly to playCtx.destination. This isn't cosmetic:
@@ -245,25 +240,45 @@ function base64ToInt16(base64) {
 // real audio hardware here) -- it addresses the documented likely cause, but needs
 // hands-on confirmation on a real device.
 //
-// 2026-08-24: real-device testing found a regression from this same routing change --
-// audible clicking/ticking noise ("哒哒哒哒哒") during assistant playback that wasn't
-// there before. Likely cause: forcing the AudioContext itself to run at 24000Hz (to
-// match the incoming PCM16 chunks 1:1, avoiding a resample inside the Web Audio graph)
-// means the MediaStreamAudioDestinationNode's output -- and therefore what the <audio>
-// element actually plays -- is also 24000Hz, a non-native rate for most audio hardware
-// (commonly 48000Hz). Direct-to-.destination playback goes through Chromium's mature,
-// glitch-free output resampler; MediaStreamTrack/<audio>-element playback goes through
-// a different pipeline (built primarily for WebRTC audio) that's known to click/pop on
-// non-native sample rates. Fix: let the context run at the browser's native rate (don't
-// force sampleRate) -- createBuffer() still declares each chunk's real rate (24000)
-// explicitly, and the Web Audio spec has the source node auto-resample on playback, so
-// no behavior changes except which resampler does the work. Not acoustically verified
-// in this sandbox (same caveat as the AEC fix above) -- needs real-device confirmation
-// that the clicking is actually gone.
-function setupPlayback() {
+// 2026-08-24, round 1: real-device testing found clicking ("哒哒哒") after forcing the
+// AudioContext to run at 24000Hz (to match the PCM chunks 1:1) -- MediaStreamTrack/
+// <audio>-element playback clicks on non-native sample rates. Fixed by letting the
+// context run at its native rate and resampling on playback instead.
+//
+// 2026-08-24, round 2: clicking persisted, recurring later in long responses, even after
+// giving the old scheduling approach (creating one AudioBufferSourceNode per chunk,
+// scheduled back-to-back via nextPlayTime) a lookahead margin and per-chunk fades. That
+// approach is fragile by construction: every chunk boundary is a point where two
+// independently-scheduled nodes' timing has to line up exactly, and anything that nudges
+// one chunk's arrival relative to the schedule -- network jitter, a GC pause, or just
+// accumulated imprecision over many chunks in a long response -- produces an audible
+// edge there. Replaced with an AudioWorkletNode (pcm-player-worklet.js) backed by a
+// small ring buffer: there's only one continuously-running audio callback for the whole
+// session, chunks are just appended to its buffer whenever they arrive over the
+// WebSocket, and an underrun (the buffer runs dry because the next chunk hasn't arrived
+// yet) produces brief silence, not a click -- there's no per-chunk scheduling boundary
+// left to misalign. This is the standard architecture for streamed PCM playback (the
+// same shape any WebRTC/streaming-audio app uses), not a workaround layered on top of
+// the discrete-node approach.
+//
+// The worklet processes audio at the AudioContext's native rate; resampleTo() below
+// converts each 24kHz chunk to that rate on the main thread before handing it to the
+// worklet, since AudioWorkletProcessor has no resampler of its own (this is what
+// createBuffer()+AudioBufferSourceNode used to do for us automatically).
+// Not acoustically verified in this sandbox (no real audio hardware here, same caveat as
+// every playback fix in this file) -- needs real-device confirmation.
+async function setupPlayback() {
   playCtx = new (window.AudioContext || window.webkitAudioContext)();
-  nextPlayTime = 0;
+  await playCtx.audioWorklet.addModule("/static/pcm-player-worklet.js");
+  playWorkletNode = new AudioWorkletNode(playCtx, "pcm-player", {
+    numberOfInputs: 0,
+    numberOfOutputs: 1,
+    outputChannelCount: [1],
+  });
+
   playDestNode = playCtx.createMediaStreamDestination();
+  playWorkletNode.connect(playDestNode);
+
   if (!playElement) {
     playElement = document.createElement("audio");
     playElement.autoplay = true;
@@ -272,68 +287,39 @@ function setupPlayback() {
   }
   playElement.srcObject = playDestNode.stream;
 
-  // Gives updateVoiceOrb() something to read while SPEAKING -- each chunk's source node
-  // fans out to this in addition to playDestNode, doesn't affect actual playback.
+  // Gives updateVoiceOrb() something to read while SPEAKING.
   playAnalyser = playCtx.createAnalyser();
   playAnalyser.fftSize = 256;
+  playWorkletNode.connect(playAnalyser);
 }
 
-// Real-device testing (2026-08-24) found clicking ("哒哒哒") recurring later in long
-// assistant responses even after the native-sample-rate fix above. Root cause: this
-// function used to schedule each chunk at `Math.max(nextPlayTime, currentTime)` -- fine
-// while nextPlayTime stays comfortably ahead of currentTime, but network jitter or a GC
-// pause can let currentTime catch up to nextPlayTime with zero margin left. From that
-// point on, every chunk that arrives even slightly late snaps straight to currentTime,
-// which means the previous chunk's buffer has *already* finished playing and the output
-// has gone to silence before this one starts -- a hard silence-to-signal edge, which is
-// exactly what a "click" is. It doesn't happen at the start of a response (there's
-// nothing to fall behind yet) or on a fast/idle network (nextPlayTime never gets caught),
-// which matches "shows up partway through longer turns" rather than every time.
-//
-// Two independent fixes, both cheap:
-// - A small lookahead margin (PLAYBACK_LOOKAHEAD_SEC) whenever scheduling would otherwise
-//   catch down to currentTime -- gives a late-arriving next chunk room to land on time
-//   instead of underrunning. Applies uniformly to the first chunk of a response too
-//   (nextPlayTime starts at/near 0 there), which doubles as the "buffer ~80ms before
-//   playing" jitter-buffer behavior.
-// - A short linear fade-in/out per chunk (CHUNK_FADE_SEC) via a GainNode, so even a
-//   residual few-sample misalignment at a chunk boundary (adjacent chunks are arbitrary
-//   cut points in a continuous waveform, not guaranteed to meet at a zero-crossing) is
-//   smoothed instead of an audible discontinuity.
-// Not acoustically re-verified in this sandbox (no real audio hardware here, same caveat
-// as the fixes above) -- needs real-device confirmation.
+// Linear-interpolation resample -- good enough for 24kHz -> ~48kHz speech playback, and
+// far simpler than a proper polyphase resampler. Each chunk is resampled independently
+// (the worklet's ring buffer is what stitches chunks together into continuous audio, not
+// this function), so the very last output sample of a chunk can't interpolate against
+// the next chunk's first sample yet and just clamps to the chunk's own last sample
+// instead -- a tiny, sub-sample approximation at each chunk seam, not a discontinuity.
+function resampleTo(float32, fromRate, toRate) {
+  if (fromRate === toRate) return float32;
+  const ratio = toRate / fromRate;
+  const outLength = Math.round(float32.length * ratio);
+  const out = new Float32Array(outLength);
+  for (let i = 0; i < outLength; i++) {
+    const srcPos = i / ratio;
+    const i0 = Math.floor(srcPos);
+    const i1 = Math.min(i0 + 1, float32.length - 1);
+    const frac = srcPos - i0;
+    out[i] = float32[i0] * (1 - frac) + float32[i1] * frac;
+  }
+  return out;
+}
+
 function playPCM16Chunk(base64) {
   const int16 = base64ToInt16(base64);
   const float32 = new Float32Array(int16.length);
   for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7fff);
-
-  const buffer = playCtx.createBuffer(1, float32.length, 24000);
-  buffer.copyToChannel(float32, 0);
-
-  const source = playCtx.createBufferSource();
-  source.buffer = buffer;
-
-  const gain = playCtx.createGain();
-  source.connect(gain);
-  gain.connect(playDestNode);
-  if (playAnalyser) gain.connect(playAnalyser);
-
-  const caughtUp = nextPlayTime <= playCtx.currentTime;
-  const startAt = caughtUp ? playCtx.currentTime + PLAYBACK_LOOKAHEAD_SEC : nextPlayTime;
-
-  const fade = Math.min(CHUNK_FADE_SEC, buffer.duration / 2);
-  gain.gain.setValueAtTime(0, startAt);
-  gain.gain.linearRampToValueAtTime(1, startAt + fade);
-  gain.gain.setValueAtTime(1, startAt + buffer.duration - fade);
-  gain.gain.linearRampToValueAtTime(0, startAt + buffer.duration);
-
-  source.start(startAt);
-  nextPlayTime = startAt + buffer.duration;
-
-  activeSources.push(source);
-  source.onended = () => {
-    activeSources = activeSources.filter((s) => s !== source);
-  };
+  const resampled = resampleTo(float32, 24000, playCtx.sampleRate);
+  playWorkletNode?.port.postMessage({ type: "push", samples: resampled }, [resampled.buffer]);
 }
 
 // ---- voice-session "tech orb" (docs/app-design.md 8.3) ----
@@ -389,11 +375,7 @@ function stopVoiceOrb() {
 }
 
 function stopPlayback() {
-  activeSources.forEach((s) => {
-    try { s.stop(); } catch (e) { /* already stopped */ }
-  });
-  activeSources = [];
-  nextPlayTime = playCtx ? playCtx.currentTime : 0;
+  playWorkletNode?.port.postMessage({ type: "clear" });
 }
 
 // ---- realtime session ----
@@ -625,7 +607,7 @@ async function start() {
       micStream = null;
     }
 
-    setupPlayback();
+    await setupPlayback();
 
     if (micStream) {
       captureCtx = new (window.AudioContext || window.webkitAudioContext)();
