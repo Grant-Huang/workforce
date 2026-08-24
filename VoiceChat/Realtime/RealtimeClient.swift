@@ -1,5 +1,9 @@
 import Foundation
-import Starscream
+import Network
+import NIOCore
+import NIOHTTP1
+import NIOWebSocket
+import NIOTransportServices
 
 /// WebSocket client for Realtime-API-style voice endpoints (OpenAI Realtime API,
 /// Qwen-Omni-Realtime / Qwen-Audio-Realtime — see `RealtimeModels.swift`).
@@ -8,21 +12,40 @@ import Starscream
 /// typed callbacks the view model consumes. Networking-only: it doesn't know
 /// anything about audio capture/playback (see `AudioIOManager`).
 ///
-/// Built on Starscream instead of `URLSessionWebSocketTask` — real-device debugging
-/// (2026-08-24) tracked a 100%-reproducible "Socket is not connected" failure (both
-/// WiFi and cellular, independent of Key/Workspace config) to the system WebSocket
-/// task negotiating HTTP/2 ALPN with servers that advertise it (this one does — Aliyun's
-/// istio-envoy gateway accepts h2 for plain HTTPS requests fine, confirmed via curl).
-/// The handshake itself completed (`HTTP 101`), but the underlying `nw_flow` never
-/// became write-ready afterward (`nw_flow_add_write_request ... cannot accept write
-/// requests`), and a self-imposed retry (see git history) didn't help — it wasn't a
-/// one-off race, every attempt against this server failed the same way, while a
-/// generic public WebSocket server (no h2 support) worked fine on the same device.
-/// Starscream's default engine (`useCustomEngine: true`, set explicitly below) speaks
-/// the WebSocket handshake over a raw `Foundation` stream it manages itself, entirely
-/// bypassing `URLSessionWebSocketTask` and the h2 ALPN path that broke it.
+/// Built on `swift-nio-transport-services` instead of `URLSessionWebSocketTask` or
+/// Starscream — see docs/realtime-websocket-transport-design.md for the full writeup.
+/// Short version: `URLSessionWebSocketTask` was tracked (2026-08-24, real-device
+/// debugging) to a 100%-reproducible connection failure caused by it negotiating
+/// HTTP/2 ALPN against servers that advertise it (this one does). Starscream, adopted
+/// to work around that, turned out to have its own matching unresolved bugs (a missing
+/// Authorization header on the handshake request, and a WebSocket frame-parsing bug —
+/// both with open upstream issues). `NIOTSConnectionBootstrap.tlsOptions(_:)` gives
+/// direct control over the TLS ALPN protocol list via `Network.framework`, so instead
+/// of hoping a third-party library's internal transport choice happens to avoid h2,
+/// this explicitly restricts ALPN to `http/1.1` — the actual root cause, addressed
+/// directly rather than worked around.
+///
+/// Requires iOS 17+ (`NIOAsyncChannel`/`NIOTypedWebSocketClientUpgrader`'s async APIs) --
+/// already the project's deployment target (project.yml), so no `@available` needed here.
 final class RealtimeClient: NSObject {
-    private var socket: WebSocket?
+    private typealias WSChannel = NIOAsyncChannel<WebSocketFrame, WebSocketFrame>
+
+    /// One event loop is plenty for a single WebSocket connection; a fresh group per
+    /// instance (rather than a shared singleton) keeps lifecycle simple -- shut down in
+    /// `disconnect()`/`deinit` so its background thread doesn't leak.
+    private let eventLoopGroup = NIOTSEventLoopGroup(loopCount: 1)
+    private var outbound: NIOAsyncChannelOutboundWriter<WebSocketFrame>?
+    private var receiveTask: Task<Void, Never>?
+    /// `URLSessionWebSocketTask` sends pings under the hood automatically; NIO's raw
+    /// WebSocket channel does not, so the peer (and any proxy/load balancer in front of
+    /// it) can silently time out an otherwise-healthy connection. Sent every 20s while
+    /// connected, cancelled on disconnect.
+    private var pingTask: Task<Void, Never>?
+    /// Frame reassembly for fragmented messages (`fin: false` followed by `.continuation`
+    /// frames) -- `URLSessionWebSocketTask` and Starscream both did this transparently,
+    /// so nothing above this layer has ever had to think about it; NIO hands over raw
+    /// wire frames and expects the caller to reassemble.
+    private var fragmentBuffer: Data?
 
     var onAudioDelta: ((Data) -> Void)?
     var onTranscriptDelta: ((String) -> Void)?
@@ -39,13 +62,6 @@ final class RealtimeClient: NSObject {
 
     /// Resolved on the next `session.updated` event — see `updateInstructions`.
     private var pendingInstructionsAck: (() -> Void)?
-
-    /// The initial `session.update` built by `connect()`, held until Starscream's
-    /// `.connected` event actually fires. Unlike `URLSessionWebSocketTask` (documented as
-    /// safe to `send()` immediately after `resume()`, before the handshake completes),
-    /// Starscream's `write()` has no such guarantee, so this waits for the real
-    /// connection instead of assuming it.
-    private var pendingInitialSessionUpdate: [String: Any]?
 
     /// - Parameters:
     ///   - baseURL: The realtime endpoint, without the `model` query param, e.g.
@@ -71,31 +87,145 @@ final class RealtimeClient: NSObject {
             return
         }
         components.queryItems = [URLQueryItem(name: "model", value: model)]
-        guard let url = components.url else {
+        guard let url = components.url, let host = url.host else {
             onError?("could not build WebSocket URL from: \(baseURL)")
             return
         }
-
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        if url.host?.contains("openai.com") == true {
-            request.setValue("realtime=v1", forHTTPHeaderField: "OpenAI-Beta")
-        }
-
-        let socket = WebSocket(request: request, useCustomEngine: true)
-        // Starscream's callbacks otherwise fire on whatever queue the underlying
-        // transport happens to use -- not necessarily the main thread. Every consumer
-        // (`ConversationViewModel`, `DictationViewModel`) mutates `@Published` state in
-        // these callbacks, which is only safe from the main thread (SwiftUI's
-        // "Publishing changes from background threads is not allowed" warning was a
-        // real, observed real-device symptom of getting this wrong -- see git history).
-        socket.callbackQueue = .main
-        socket.delegate = self
-        self.socket = socket
+        let port = url.port ?? 443
+        let uri = (components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath) + (components.percentEncodedQuery.map { "?\($0)" } ?? "")
+        let isOpenAI = host.contains("openai.com")
 
         pendingInstructionsAck = onSessionReady
-        pendingInitialSessionUpdate = RealtimeOutgoingEvent.sessionUpdate(instructions: instructions, voice: voice, turnDetection: turnDetection, autoRespond: autoRespond, modalities: modalities)
-        socket.connect()
+        fragmentBuffer = nil // this instance may be reused across connect()/disconnect() cycles
+        let initialSessionUpdate = RealtimeOutgoingEvent.sessionUpdate(instructions: instructions, voice: voice, turnDetection: turnDetection, autoRespond: autoRespond, modalities: modalities)
+
+        receiveTask = Task { [weak self, eventLoopGroup] in
+            guard let self else { return }
+            do {
+                let channel = try await Self.openWebSocket(group: eventLoopGroup, host: host, port: port, uri: uri, apiKey: apiKey, isOpenAI: isOpenAI)
+                try await channel.executeThenClose { inbound, outbound in
+                    await MainActor.run {
+                        self.outbound = outbound
+                        self.startPingTask()
+                    }
+                    try await Self.write(initialSessionUpdate, to: outbound)
+                    for try await frame in inbound {
+                        if Task.isCancelled { return }
+                        await self.handleFrame(frame)
+                        if frame.opcode == .connectionClose { return }
+                    }
+                }
+                await MainActor.run { self.onDisconnect?(nil) }
+            } catch is CancellationError {
+                // disconnect() cancelled receiveTask -- expected, not an error to surface.
+            } catch {
+                await MainActor.run { self.onError?("connect failed: \(error)") }
+            }
+            await MainActor.run {
+                self.outbound = nil
+                self.stopPingTask()
+            }
+        }
+    }
+
+    /// Builds the connection and performs the WebSocket upgrade. A free function (no
+    /// `self` capture) because `NIOTSConnectionBootstrap.connect`'s `channelInitializer`
+    /// closure is `@Sendable` and this class isn't `Sendable` -- everything it needs is
+    /// passed in as plain, already-`Sendable` values instead.
+    private static func openWebSocket(group: NIOTSEventLoopGroup, host: String, port: Int, uri: String, apiKey: String, isOpenAI: Bool) async throws -> WSChannel {
+        enum UpgradeResult {
+            case websocket(WSChannel)
+            case notUpgraded
+        }
+
+        let bootstrap = NIOTSConnectionBootstrap(group: group)
+            .tlsOptions(http1OnlyTLSOptions())
+
+        let upgradeResult: UpgradeResult = try await bootstrap.connect(host: host, port: port) { channel in
+            channel.eventLoop.makeCompletedFuture {
+                let upgrader = NIOTypedWebSocketClientUpgrader<UpgradeResult>(
+                    upgradePipelineHandler: { channel, _ in
+                        channel.eventLoop.makeCompletedFuture {
+                            .websocket(try WSChannel(wrappingChannelSynchronously: channel))
+                        }
+                    }
+                )
+
+                var headers = HTTPHeaders()
+                headers.add(name: "Host", value: host)
+                headers.add(name: "Authorization", value: "Bearer \(apiKey)")
+                if isOpenAI {
+                    headers.add(name: "OpenAI-Beta", value: "realtime=v1")
+                }
+
+                let requestHead = HTTPRequestHead(version: .http1_1, method: .GET, uri: uri, headers: headers)
+                let upgradeConfiguration = NIOTypedHTTPClientUpgradeConfiguration(
+                    upgradeRequestHead: requestHead,
+                    upgraders: [upgrader],
+                    notUpgradingCompletionHandler: { channel in
+                        channel.eventLoop.makeCompletedFuture { .notUpgraded }
+                    }
+                )
+
+                return try channel.pipeline.syncOperations.configureUpgradableHTTPClientPipeline(
+                    configuration: .init(upgradeConfiguration: upgradeConfiguration)
+                )
+            }
+        }
+
+        switch upgradeResult {
+        case .websocket(let channel):
+            return channel
+        case .notUpgraded:
+            // NOTE: the typed upgrader's `notUpgradingCompletionHandler` doesn't hand back
+            // the rejected HTTPResponseHead, so unlike the URLSessionWebSocketTask/
+            // Starscream-era code this can't surface a `[handshake HTTP xxx]` diagnostic
+            // -- a real regression versus #12/#15's diagnostic, called out in the design
+            // doc and left as a follow-up rather than guessed at against unverified NIO
+            // pipeline internals. `curl --http1.1` against the same URL remains the
+            // fallback to see the actual rejected status/body (used throughout this
+            // debugging session already).
+            throw NSError(domain: "RealtimeClient.WebSocket", code: -1, userInfo: [NSLocalizedDescriptionKey: "HTTP upgrade rejected"])
+        }
+    }
+
+    /// Only offers `http/1.1` in ALPN -- see the class doc comment for why this specific
+    /// line is the actual fix this whole rewrite exists for.
+    ///
+    /// UNVERIFIED (no Swift toolchain in this environment): `sec_protocol_options_add_tls_
+    /// application_protocol`'s exact signature couldn't be confirmed against Apple's docs
+    /// (JS-rendered, not fetchable here) or by compiling. Matches the well-established
+    /// public pattern for setting ALPN via `NWProtocolTLS.Options.securityProtocolOptions`
+    /// from memory/community examples, but double-check this compiles before relying on it.
+    private static func http1OnlyTLSOptions() -> NWProtocolTLS.Options {
+        let options = NWProtocolTLS.Options()
+        sec_protocol_options_add_tls_application_protocol(options.securityProtocolOptions, "http/1.1")
+        return options
+    }
+
+    private static func write(_ payload: [String: Any], to outbound: NIOAsyncChannelOutboundWriter<WebSocketFrame>) async throws {
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        var buffer = ByteBufferAllocator().buffer(capacity: data.count)
+        buffer.writeBytes(data)
+        try await outbound.write(WebSocketFrame(fin: true, opcode: .binary, maskKey: .random(), data: buffer))
+    }
+
+    /// Every 20s while connected -- see `pingTask`'s doc comment for why this exists.
+    private func startPingTask() {
+        pingTask?.cancel()
+        pingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                guard !Task.isCancelled, let self, let outbound = self.outbound else { return }
+                let buffer = ByteBufferAllocator().buffer(capacity: 0)
+                try? await outbound.write(WebSocketFrame(fin: true, opcode: .ping, maskKey: .random(), data: buffer))
+            }
+        }
+    }
+
+    private func stopPingTask() {
+        pingTask?.cancel()
+        pingTask = nil
     }
 
     /// Submits a typed or dictated-and-cleaned-up text message as a user turn.
@@ -104,9 +234,15 @@ final class RealtimeClient: NSObject {
     }
 
     func disconnect() {
-        socket?.disconnect()
-        socket = nil
-        pendingInitialSessionUpdate = nil
+        // eventLoopGroup is deliberately NOT shut down here (only in deinit) -- callers
+        // (ConversationViewModel, DictationViewModel) hold one RealtimeClient instance
+        // across repeated connect()/disconnect() cycles rather than making a fresh one
+        // each time, and a shut-down NIOTSEventLoopGroup can't be reused for a later
+        // connect(). One idle event loop (loopCount: 1) between connections is cheap.
+        receiveTask?.cancel()
+        receiveTask = nil
+        stopPingTask()
+        outbound = nil
     }
 
     func sendAudioChunk(_ data: Data) {
@@ -134,8 +270,52 @@ final class RealtimeClient: NSObject {
     }
 
     private func send(_ payload: [String: Any]) {
-        guard let socket, let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
-        socket.write(data: data, completion: nil)
+        guard let outbound else { return }
+        Task { [weak self] in
+            do {
+                try await Self.write(payload, to: outbound)
+            } catch {
+                await MainActor.run { self?.onError?("send failed: \(error)") }
+            }
+        }
+    }
+
+    /// Reassembles fragmented messages (see `fragmentBuffer`) and dispatches control
+    /// frames. `.unmaskedData` (not `.data`) is used deliberately: server-to-client
+    /// frames are never supposed to be masked per RFC 6455, but Starscream's "masked and
+    /// rsv data is not currently supported" bug (the reason this class no longer uses
+    /// Starscream — see docs/realtime-websocket-transport-design.md) suggests something
+    /// in this path (a misbehaving proxy, most likely) sometimes does mask them anyway.
+    /// `.unmaskedData` handles both cases instead of erroring on the protocol violation.
+    @MainActor
+    private func handleFrame(_ frame: WebSocketFrame) {
+        switch frame.opcode {
+        case .text, .binary:
+            let chunk = Data(frame.unmaskedData.readableBytesView)
+            if frame.fin {
+                handle(chunk)
+            } else {
+                fragmentBuffer = chunk
+            }
+        case .continuation:
+            let chunk = Data(frame.unmaskedData.readableBytesView)
+            fragmentBuffer = (fragmentBuffer ?? Data()) + chunk
+            if frame.fin {
+                let complete = fragmentBuffer ?? Data()
+                fragmentBuffer = nil
+                handle(complete)
+            }
+        case .connectionClose:
+            // No onDisconnect?(nil) here -- the caller's receive loop (connect()) sees
+            // this same opcode, returns from executeThenClose's closure, and that's what
+            // actually fires onDisconnect once the channel finishes closing. Calling it
+            // here too would fire it twice for a server-initiated close.
+            break
+        case .ping, .pong:
+            break
+        default:
+            break
+        }
     }
 
     private func handle(_ data: Data) {
@@ -170,55 +350,9 @@ final class RealtimeClient: NSObject {
         }
     }
 
-    /// Turns Starscream's error types into the same actionable `"... [handshake HTTP
-    /// xxx]"` diagnostic the old `URLSessionTask.response`-based code surfaced. Real-
-    /// device testing (2026-08-24) caught this file's first cut of this method
-    /// completely missing the case that actually matters: a rejected HTTP upgrade
-    /// (server responds with a non-101 status) throws `HTTPUpgradeError.notAnUpgrade`,
-    /// not `WSError` -- the `error as? WSError` cast silently failed for it, falling
-    /// through to `error.localizedDescription`, which for an untyped Swift error bridged
-    /// to NSError is a useless "operation couldn't be completed (Starscream.
-    /// HTTPUpgradeError error 0)" (0 being the case's ordinal, not the HTTP status the
-    /// error actually carries). Checked first since a rejected upgrade is exactly the
-    /// server-side-error scenario this diagnostic exists for. `WSError.message` is now
-    /// always surfaced when the cast succeeds too, for the same reason -- its `.code`
-    /// isn't always a real HTTP status (e.g. transport/security errors reuse the field
-    /// differently), and falling back to the generic description in that case hid a
-    /// perfectly good message another real-device failure turned up ("Starscream.WSError
-    /// error 1").
-    private func errorDescription(_ error: Error?) -> String {
-        guard let error else { return "unknown WebSocket error" }
-        if case let HTTPUpgradeError.notAnUpgrade(code, _) = error {
-            return "HTTP upgrade rejected [handshake HTTP \(code)]"
-        }
-        if let wsError = error as? WSError {
-            let diagnostic = (100...599).contains(wsError.code) ? " [handshake HTTP \(wsError.code)]" : ""
-            return "\(wsError.message)\(diagnostic)"
-        }
-        return error.localizedDescription
-    }
-}
-
-extension RealtimeClient: WebSocketDelegate {
-    func didReceive(event: WebSocketEvent, client: WebSocketClient) {
-        switch event {
-        case .connected:
-            if let pending = pendingInitialSessionUpdate {
-                pendingInitialSessionUpdate = nil
-                send(pending)
-            }
-        case .text(let string):
-            handle(Data(string.utf8))
-        case .binary(let data):
-            handle(data)
-        case .disconnected(let reason, let code):
-            onDisconnect?(NSError(domain: "RealtimeClient.WebSocket", code: Int(code), userInfo: [NSLocalizedDescriptionKey: reason]))
-        case .peerClosed, .cancelled:
-            onDisconnect?(nil)
-        case .error(let error):
-            onError?(errorDescription(error))
-        case .viabilityChanged, .reconnectSuggested, .ping, .pong:
-            break
-        }
+    deinit {
+        receiveTask?.cancel()
+        pingTask?.cancel()
+        eventLoopGroup.shutdownGracefully { _ in }
     }
 }
