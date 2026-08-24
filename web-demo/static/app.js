@@ -340,6 +340,46 @@ function readAnalyserLevel(analyser) {
   return Math.min(1, avg / 90); // 90, not 255: normal speech shouldn't need to peak the scale to register
 }
 
+// Defense-in-depth against the assistant's own played-back speech leaking into the mic
+// (residual echo the browser's AEC didn't fully cancel) getting misread by the server's
+// VAD as the user interrupting -- real-device report (2026-08-24). This does NOT fix the
+// underlying acoustic issue (that needs headphones or better hardware AEC -- see
+// docs/... discussion); it's a client-side confirmation gate on top of the server's
+// speech_started signal, specifically for the one scenario where a false trigger is
+// actually possible: while the assistant is SPEAKING (there's assistant audio for the
+// mic to have picked back up). A normal turn-start, where the assistant is already
+// silent, has nothing to false-trigger from and isn't gated -- see the speech_started
+// handler below.
+//
+// Echo residual tends to be a brief spike rather than sustained energy the way genuine
+// continued speech is, so this samples mic level for BARGE_IN_CONFIRM_MS and requires
+// the *average* (not "every single sample", which would also reject real speech's
+// natural brief dips between syllables) to clear BARGE_IN_CONFIRM_LEVEL before treating
+// it as a real interruption. Trade-off: genuine barge-in now takes ~BARGE_IN_CONFIRM_MS
+// longer to register. Neither constant is acoustically tuned (no real audio hardware in
+// this sandbox, same caveat as every playback/echo fix in this file) -- needs real-device
+// confirmation and likely adjustment.
+const BARGE_IN_CONFIRM_MS = 250;
+const BARGE_IN_CONFIRM_LEVEL = 0.12; // same 0-1 scale as readAnalyserLevel()
+
+function confirmSustainedMicLevel(analyser, durationMs, level) {
+  return new Promise((resolve) => {
+    if (!analyser) { resolve(true); return; }
+    const samples = [];
+    const start = performance.now();
+    const sample = () => {
+      samples.push(readAnalyserLevel(analyser));
+      if (performance.now() - start >= durationMs) {
+        const avg = samples.reduce((a, b) => a + b, 0) / samples.length;
+        resolve(avg >= level);
+        return;
+      }
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
+}
+
 function updateVoiceOrb() {
   let level = 0;
   if (state === STATE.LISTENING) level = readAnalyserLevel(micAnalyser);
@@ -536,6 +576,14 @@ async function handleUserTurn(text, session) {
   sendEventOn(session.getWs(), { type: "response.create" });
 }
 
+function handleBargeIn() {
+  stopPlayback();
+  sendEvent({ type: "response.cancel" });
+  assistantBubbleEl = null;
+  assistantHasDelta = false;
+  setState(STATE.LISTENING);
+}
+
 function handleServerEvent(json) {
   switch (json.type) {
     case "session.created":
@@ -566,11 +614,20 @@ function handleServerEvent(json) {
       // generating/streaming after the user interrupts, and any response.audio.delta
       // that arrives after this point would just restart playback. Matches iOS's
       // onSpeechStarted (interruptPlayback + cancelResponse), which already did both.
-      stopPlayback();
-      sendEvent({ type: "response.cancel" });
-      assistantBubbleEl = null;
-      assistantHasDelta = false;
-      setState(STATE.LISTENING);
+      //
+      // Only gated by confirmSustainedMicLevel while the assistant is actually SPEAKING
+      // -- see that function's doc comment. A normal turn-start (assistant already
+      // silent) has no echo to false-trigger from, so it's confirmed immediately, same
+      // as before this change.
+      if (state === STATE.SPEAKING) {
+        confirmSustainedMicLevel(micAnalyser, BARGE_IN_CONFIRM_MS, BARGE_IN_CONFIRM_LEVEL).then((confirmed) => {
+          // Re-check state: the assistant may have already finished on its own (or the
+          // user may have hung up) during the confirmation window.
+          if (confirmed && state === STATE.SPEAKING) handleBargeIn();
+        });
+      } else {
+        handleBargeIn();
+      }
       break;
     case "response.done":
       finalizeAssistantTurn(voiceSession);
