@@ -1,4 +1,5 @@
 import Foundation
+import Starscream
 
 /// WebSocket client for Realtime-API-style voice endpoints (OpenAI Realtime API,
 /// Qwen-Omni-Realtime / Qwen-Audio-Realtime — see `RealtimeModels.swift`).
@@ -6,9 +7,22 @@ import Foundation
 /// Owns the socket connection and translates between raw JSON events and the
 /// typed callbacks the view model consumes. Networking-only: it doesn't know
 /// anything about audio capture/playback (see `AudioIOManager`).
+///
+/// Built on Starscream instead of `URLSessionWebSocketTask` — real-device debugging
+/// (2026-08-24) tracked a 100%-reproducible "Socket is not connected" failure (both
+/// WiFi and cellular, independent of Key/Workspace config) to the system WebSocket
+/// task negotiating HTTP/2 ALPN with servers that advertise it (this one does — Aliyun's
+/// istio-envoy gateway accepts h2 for plain HTTPS requests fine, confirmed via curl).
+/// The handshake itself completed (`HTTP 101`), but the underlying `nw_flow` never
+/// became write-ready afterward (`nw_flow_add_write_request ... cannot accept write
+/// requests`), and a self-imposed retry (see git history) didn't help — it wasn't a
+/// one-off race, every attempt against this server failed the same way, while a
+/// generic public WebSocket server (no h2 support) worked fine on the same device.
+/// Starscream's default engine (`useCustomEngine: true`, set explicitly below) speaks
+/// the WebSocket handshake over a raw `Foundation` stream it manages itself, entirely
+/// bypassing `URLSessionWebSocketTask` and the h2 ALPN path that broke it.
 final class RealtimeClient: NSObject {
-    private var task: URLSessionWebSocketTask?
-    private let session: URLSession
+    private var socket: WebSocket?
 
     var onAudioDelta: ((Data) -> Void)?
     var onTranscriptDelta: ((String) -> Void)?
@@ -26,10 +40,12 @@ final class RealtimeClient: NSObject {
     /// Resolved on the next `session.updated` event — see `updateInstructions`.
     private var pendingInstructionsAck: (() -> Void)?
 
-    override init() {
-        self.session = URLSession(configuration: .default)
-        super.init()
-    }
+    /// The initial `session.update` built by `connect()`, held until Starscream's
+    /// `.connected` event actually fires. Unlike `URLSessionWebSocketTask` (documented as
+    /// safe to `send()` immediately after `resume()`, before the handshake completes),
+    /// Starscream's `write()` has no such guarantee, so this waits for the real
+    /// connection instead of assuming it.
+    private var pendingInitialSessionUpdate: [String: Any]?
 
     /// - Parameters:
     ///   - baseURL: The realtime endpoint, without the `model` query param, e.g.
@@ -66,13 +82,20 @@ final class RealtimeClient: NSObject {
             request.setValue("realtime=v1", forHTTPHeaderField: "OpenAI-Beta")
         }
 
-        let task = session.webSocketTask(with: request)
-        self.task = task
-        task.resume()
-        receiveLoop()
+        let socket = WebSocket(request: request, useCustomEngine: true)
+        // Starscream's callbacks otherwise fire on whatever queue the underlying
+        // transport happens to use -- not necessarily the main thread. Every consumer
+        // (`ConversationViewModel`, `DictationViewModel`) mutates `@Published` state in
+        // these callbacks, which is only safe from the main thread (SwiftUI's
+        // "Publishing changes from background threads is not allowed" warning was a
+        // real, observed real-device symptom of getting this wrong -- see git history).
+        socket.callbackQueue = .main
+        socket.delegate = self
+        self.socket = socket
 
         pendingInstructionsAck = onSessionReady
-        send(RealtimeOutgoingEvent.sessionUpdate(instructions: instructions, voice: voice, turnDetection: turnDetection, autoRespond: autoRespond, modalities: modalities))
+        pendingInitialSessionUpdate = RealtimeOutgoingEvent.sessionUpdate(instructions: instructions, voice: voice, turnDetection: turnDetection, autoRespond: autoRespond, modalities: modalities)
+        socket.connect()
     }
 
     /// Submits a typed or dictated-and-cleaned-up text message as a user turn.
@@ -81,8 +104,9 @@ final class RealtimeClient: NSObject {
     }
 
     func disconnect() {
-        task?.cancel(with: .normalClosure, reason: nil)
-        task = nil
+        socket?.disconnect()
+        socket = nil
+        pendingInitialSessionUpdate = nil
     }
 
     func sendAudioChunk(_ data: Data) {
@@ -109,81 +133,13 @@ final class RealtimeClient: NSObject {
         send(RealtimeOutgoingEvent.responseCancel())
     }
 
-    /// Real-device bug (2026-08-24): the WebSocket upgrade can complete successfully
-    /// (`task.response` reporting `HTTP 101`) while the underlying `nw_flow` is still not
-    /// write-ready yet — observed as `nw_flow_add_write_request ... cannot accept write
-    /// requests` in the console, surfacing here as a `send()` failure with "Socket is not
-    /// connected" despite the handshake having genuinely succeeded. Reproduced 100% of
-    /// the time over cellular on the affected device, right on `connect()`'s first send
-    /// (the `session.update` fired immediately after `task.resume()`, per Apple's own
-    /// documented usage — no delay to wait out on our side). One retry after a short
-    /// delay is a cheap, low-risk way to ride out that race instead of surfacing an
-    /// error for a connection that's actually fine a moment later; a second failure is
-    /// treated as real.
-    private func send(_ payload: [String: Any], isRetry: Bool = false) {
-        guard let task, let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
-        let message = URLSessionWebSocketTask.Message.data(data)
-        task.send(message) { [weak self] error in
-            guard let self, let error else { return }
-            guard isRetry else {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                    self?.send(payload, isRetry: true)
-                }
-                return
-            }
-            self.deliver { self.onError?("send failed: \(error.localizedDescription)\(self.handshakeDiagnostic)") }
-        }
+    private func send(_ payload: [String: Any]) {
+        guard let socket, let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        socket.write(data: data, completion: nil)
     }
 
-    private func receiveLoop() {
-        task?.receive { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .failure(let error):
-                let diagnostic = self.handshakeDiagnostic
-                self.deliver { self.onDisconnect?(diagnostic.isEmpty ? error : NSError(domain: (error as NSError).domain, code: (error as NSError).code, userInfo: [NSLocalizedDescriptionKey: "\(error.localizedDescription)\(diagnostic)"])) }
-                return
-            case .success(let message):
-                self.deliver { self.handle(message) }
-                self.receiveLoop()
-            }
-        }
-    }
-
-    /// The WebSocket handshake is a plain HTTP request/response under the hood (the
-    /// `101 Switching Protocols` upgrade) — `URLSessionTask.response` exposes it once
-    /// the server has replied, even when the upgrade itself failed (e.g. a `400` with a
-    /// JSON error body instead of the expected `101`). Surfacing the real status code
-    /// here turns an opaque OS error string (e.g. "server sent an invalid or incorrect
-    /// response", -1011) into an actionable one, instead of requiring a separate
-    /// out-of-band curl repro to see what the server actually said.
-    private var handshakeDiagnostic: String {
-        guard let http = task?.response as? HTTPURLResponse else { return "" }
-        return " [handshake HTTP \(http.statusCode)]"
-    }
-
-    /// `URLSessionWebSocketTask`'s receive/send completions fire on URLSession's own
-    /// background delegate queue, not the main thread — every one of this class's
-    /// callbacks used to be invoked directly from there, and every consumer
-    /// (`ConversationViewModel`) mutates `@Published` state in response, which is only
-    /// safe from the main thread. That mismatch was silent (Swift 5 language mode
-    /// doesn't catch it at compile time) but real: it surfaced as SwiftUI's "Publishing
-    /// changes from background threads is not allowed" runtime warning during real-
-    /// device testing (2026-08-24). Routing every callback invocation through here
-    /// fixes it in one place instead of requiring every call site to remember to hop.
-    private func deliver(_ work: @escaping () -> Void) {
-        DispatchQueue.main.async(execute: work)
-    }
-
-    private func handle(_ message: URLSessionWebSocketTask.Message) {
-        let data: Data?
-        switch message {
-        case .data(let d): data = d
-        case .string(let s): data = Data(s.utf8)
-        @unknown default: data = nil
-        }
-        guard let data,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+    private func handle(_ data: Data) {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
         switch RealtimeIncomingEvent(json: json) {
         case .audioDelta(let base64):
@@ -210,6 +166,44 @@ final class RealtimeClient: NSObject {
         case .error(let message):
             onError?(message)
         case .unhandled:
+            break
+        }
+    }
+
+    /// Turns a failed-handshake `WSError` into the same actionable `"... [handshake
+    /// HTTP xxx]"` diagnostic the old `URLSessionTask.response`-based code surfaced —
+    /// Starscream reports the real rejected-upgrade status code directly on the error
+    /// instead of requiring a separate out-of-band curl repro to see what the server
+    /// actually said. Falls back to the plain error description for anything that isn't
+    /// a recognizable HTTP status (e.g. a TLS or transport-level failure).
+    private func errorDescription(_ error: Error?) -> String {
+        guard let error else { return "unknown WebSocket error" }
+        if let wsError = error as? WSError, (100...599).contains(wsError.code) {
+            return "\(wsError.message) [handshake HTTP \(wsError.code)]"
+        }
+        return error.localizedDescription
+    }
+}
+
+extension RealtimeClient: WebSocketDelegate {
+    func didReceive(event: WebSocketEvent, client: WebSocketClient) {
+        switch event {
+        case .connected:
+            if let pending = pendingInitialSessionUpdate {
+                pendingInitialSessionUpdate = nil
+                send(pending)
+            }
+        case .text(let string):
+            handle(Data(string.utf8))
+        case .binary(let data):
+            handle(data)
+        case .disconnected(let reason, let code):
+            onDisconnect?(NSError(domain: "RealtimeClient.WebSocket", code: Int(code), userInfo: [NSLocalizedDescriptionKey: reason]))
+        case .peerClosed, .cancelled:
+            onDisconnect?(nil)
+        case .error(let error):
+            onError?(errorDescription(error))
+        case .viabilityChanged, .reconnectSuggested, .ping, .pong:
             break
         }
     }
