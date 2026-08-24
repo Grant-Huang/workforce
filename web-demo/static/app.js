@@ -149,11 +149,24 @@ function addBubble(role, text) {
 // barge-in (input_audio_buffer.speech_started) -- that's an interrupted, incomplete
 // reply, not a finished turn, so it's just discarded same as before, not persisted
 // half-formed.
-function finalizeAssistantTurn() {
+//
+// Also triggers memory extraction (docs/app-design.md 7.3) on the completed
+// user+assistant pair -- fire-and-forget, doesn't block anything else here. Skipped
+// for a save-intent turn ("记住…"): that already has its own explicit, curated write
+// (see handleUserTurn), and running extraction on top would produce a near-duplicate
+// entry paraphrasing the same content a second way.
+function finalizeAssistantTurn(session) {
   const text = assistantBubbleEl ? assistantBubbleEl.textContent : "";
   // ConversationHistory.add() also pushes to AgentNexus (with sync-status tracking +
   // retry) -- see history.js.
   if (text) ConversationHistory.add("assistant", text);
+
+  const userText = session?.pendingUserText;
+  if (session) session.pendingUserText = null;
+  if (userText && text && !SaveIntent.detect(userText)) {
+    MemoryExtraction.extractAndStore(userText, text);
+  }
+
   assistantBubbleEl = null;
   assistantHasDelta = false;
 }
@@ -431,8 +444,12 @@ function makeSessionUpdateWaiter(getWs) {
 
 const voiceUpdater = makeSessionUpdateWaiter(() => ws);
 const textUpdater = makeSessionUpdateWaiter(() => textWs);
-const voiceSession = { getWs: () => ws, updater: voiceUpdater };
-const textSession = { getWs: () => textWs, updater: textUpdater };
+// pendingUserText: set by handleUserTurn(), read (and cleared) by finalizeAssistantTurn()
+// to pair a completed reply back with what the user said, for memory extraction
+// (docs/app-design.md 7.3). Lives on these session objects rather than a module-level
+// variable so voice and text turns can't cross-contaminate each other's pairing.
+const voiceSession = { getWs: () => ws, updater: voiceUpdater, pendingUserText: null };
+const textSession = { getWs: () => textWs, updater: textUpdater, pendingUserText: null };
 
 /**
  * Every user turn — typed, dictated, or transcribed from live voice — comes through
@@ -453,6 +470,14 @@ async function handleUserTurn(text, session) {
   // Pushing this turn to AgentNexus (with sync-status tracking + retry) is handled by
   // ConversationHistory.add(), triggered from addBubble("user", ...) at every call site
   // right before this function runs -- not duplicated here.
+
+  // Paired with the assistant's reply once it's done (see finalizeAssistantTurn) to run
+  // memory extraction on the complete exchange -- extraction needs both halves, not
+  // just what the user said. Set unconditionally (even for a save-intent turn, which
+  // finalizeAssistantTurn skips by re-checking SaveIntent.detect itself) so there's one
+  // place deciding that, not two.
+  session.pendingUserText = text;
+
   const saveIntent = SaveIntent.detect(text);
 
   if (saveIntent) {
@@ -473,8 +498,11 @@ async function handleUserTurn(text, session) {
     return;
   }
 
+  // No longer stores the raw text here (used to be LocalMemory.add(text) on every
+  // turn) -- that's now finalizeAssistantTurn's job, via MemoryExtraction, once the
+  // assistant's reply is known too (docs/app-design.md 7.3). The raw transcript itself
+  // isn't lost -- ConversationHistory (history.js) already keeps a verbatim copy.
   const relevant = LocalMemory.search(text, 5);
-  LocalMemory.add(text);
 
   if (relevant.length > 0) {
     const lines = relevant.map((e) => `- ${e.text}`);
@@ -524,7 +552,7 @@ function handleServerEvent(json) {
       setState(STATE.LISTENING);
       break;
     case "response.done":
-      finalizeAssistantTurn();
+      finalizeAssistantTurn(voiceSession);
       if (state !== STATE.IDLE) setState(STATE.LISTENING);
       break;
     case "error":
@@ -770,7 +798,7 @@ function handleTextSessionEvent(json) {
       setAssistantFinalText(json.text || "");
       break;
     case "response.done":
-      finalizeAssistantTurn();
+      finalizeAssistantTurn(textSession);
       break;
     case "error":
       statusEl.textContent = `出错：${json.error?.message || "unknown"}`;

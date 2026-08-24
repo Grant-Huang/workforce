@@ -87,6 +87,13 @@ final class ConversationViewModel: ObservableObject {
     private var textConnectTimeoutTask: Task<Void, Never>?
     private var textIdleTimeoutTask: Task<Void, Never>?
     private var foregroundObserver: NSObjectProtocol?
+    /// Set by onUserTranscript/submitTextSessionMessage, read (and cleared) by their
+    /// respective onResponseDone handler to pair a completed reply back with what the
+    /// user said, for memory extraction (docs/app-design.md 7.3). Two separate
+    /// properties (not one shared value) so a voice turn and a text turn can never
+    /// cross-contaminate each other's pairing.
+    private var pendingVoiceUserText: String?
+    private var pendingTextSessionUserText: String?
 
     init() {
         conversationHistory = ConversationHistoryStore(agentNexusClient: agentNexusClient)
@@ -311,6 +318,10 @@ final class ConversationViewModel: ObservableObject {
         client.onUserTranscript = { [weak self] text in
             guard let self, !text.isEmpty else { return }
             self.appendUserTurn(text)
+            // Paired with the assistant's reply once it's done (see
+            // finalizeAssistantTurn(pairedUserText:)) to run memory extraction on the
+            // complete exchange.
+            self.pendingVoiceUserText = text
             self.groundAndRespond(to: text, session: self.client)
         }
 
@@ -326,8 +337,10 @@ final class ConversationViewModel: ObservableObject {
         }
 
         client.onResponseDone = { [weak self] in
-            self?.finalizeAssistantTurn()
-            self?.setState(.listening)
+            guard let self else { return }
+            self.finalizeAssistantTurn(pairedUserText: self.pendingVoiceUserText)
+            self.pendingVoiceUserText = nil
+            self.setState(.listening)
         }
 
         client.onError = { [weak self] message in
@@ -391,8 +404,12 @@ final class ConversationViewModel: ObservableObject {
             return
         }
 
+        // No longer stores the raw text here (used to be memoryStore.add(userText) on
+        // every turn) -- that's now finalizeAssistantTurn's job, via
+        // MemoryExtractionClient, once the assistant's reply is known too
+        // (docs/app-design.md 7.3). The raw transcript itself isn't lost --
+        // ConversationHistoryStore already keeps a verbatim copy.
         let relevant = memoryStore.search(query: userText, limit: 5)
-        memoryStore.add(userText)
 
         var instructions = systemInstructions
         if !relevant.isEmpty {
@@ -510,6 +527,10 @@ final class ConversationViewModel: ObservableObject {
 
     private func submitTextSessionMessage(_ text: String) {
         appendUserTurn(text)
+        // Paired with the assistant's reply once it's done (see
+        // finalizeAssistantTurn(pairedUserText:)) to run memory extraction on the
+        // complete exchange.
+        pendingTextSessionUserText = text
         textClient.sendUserText(text)
         groundAndRespond(to: text, session: textClient)
     }
@@ -560,7 +581,9 @@ final class ConversationViewModel: ObservableObject {
         }
 
         textClient.onResponseDone = { [weak self] in
-            self?.finalizeAssistantTurn()
+            guard let self else { return }
+            self.finalizeAssistantTurn(pairedUserText: self.pendingTextSessionUserText)
+            self.pendingTextSessionUserText = nil
         }
 
         textClient.onError = { [weak self] message in
@@ -594,13 +617,49 @@ final class ConversationViewModel: ObservableObject {
     /// locally and pushes it to AgentNexus (docs/app-design.md 8.4: previously only the
     /// user's half of the conversation was pushed/stored anywhere at all). Deliberately
     /// not called from onSpeechStarted's barge-in reset — see that callback's comment.
-    private func finalizeAssistantTurn() {
+    ///
+    /// Also triggers memory extraction (docs/app-design.md 7.3) on the completed
+    /// user+assistant pair, via `pairedUserText` (set by onUserTranscript/
+    /// submitTextSessionMessage right before the turn started) -- fire-and-forget,
+    /// doesn't block anything else here. Skipped for a save-intent turn ("记住…"): that
+    /// already has its own explicit, curated write (see groundAndRespond), and running
+    /// extraction on top would produce a near-duplicate entry paraphrasing the same
+    /// content a second way.
+    private func finalizeAssistantTurn(pairedUserText: String?) {
         if let index = assistantLineIndex, index < transcript.count {
             let text = transcript[index].text
             // conversationHistory.add() also pushes to AgentNexus (with sync-status
             // tracking + retry) -- see ConversationHistoryStore.
             if !text.isEmpty { conversationHistory.add(speaker: .assistant, text: text) }
+
+            if let pairedUserText, !text.isEmpty, SaveIntent.detect(pairedUserText) == nil {
+                Task { [weak self] in
+                    await self?.extractAndStoreMemory(userText: pairedUserText, assistantText: text)
+                }
+            }
         }
         assistantLineIndex = nil
+    }
+
+    /// The async body of memory extraction, kept separate from
+    /// `finalizeAssistantTurn(pairedUserText:)` so that function itself stays a plain
+    /// (non-async) callback body. Stores every returned fact locally; jargon-tagged
+    /// facts additionally sync into AgentNexus's curated memory via the same "过户"
+    /// mechanism a save-intent turn uses (docs/app-design.md 7.2) -- plain facts stay
+    /// local-only search fragments. No retry on a failed jargon sync yet -- unlike
+    /// ConversationHistoryStore's message pushes, nothing currently re-attempts a
+    /// failed createMemoryEntry call; the entry just stays source: .local (honest, not
+    /// silently lost -- just not auto-retried).
+    private func extractAndStoreMemory(userText: String, assistantText: String) async {
+        let knownJargon = memoryStore.recentJargonTexts()
+        guard let facts = try? await MemoryExtractionClient.extract(userText: userText, assistantText: assistantText, knownJargon: knownJargon) else {
+            return
+        }
+        for fact in facts {
+            guard let entry = memoryStore.add(fact.text, isJargon: fact.isJargon), fact.isJargon else { continue }
+            if let created = try? await agentNexusClient.createMemoryEntry(layer: "PROGRESS", content: fact.text) {
+                memoryStore.markSynced(id: entry.id, source: MemorySource.agentNexus, sourceId: created.entryId)
+            }
+        }
     }
 }
