@@ -57,6 +57,10 @@ final class ConversationViewModel: ObservableObject {
     /// session's). See `TextSessionState` and docs/app-design.md section 8.
     private var textClient = RealtimeClient()
     let memoryStore = MemoryStore()
+    /// Full conversation record, independent of `memoryStore` (extracted/searchable
+    /// fragments) — see `ConversationHistoryStore`'s doc comment and docs/app-design.md
+    /// 8.4. Shared by both sessions the same way `transcript` is.
+    private let conversationHistory = ConversationHistoryStore()
     private let agentNexusClient = AgentNexusClient()
     /// Shared between the voice and text sessions' streaming-reply-line building —
     /// safe only because the two sessions are mutually exclusive (`ConversationView`
@@ -297,12 +301,15 @@ final class ConversationViewModel: ObservableObject {
 
         client.onUserTranscript = { [weak self] text in
             guard let self, !text.isEmpty else { return }
-            self.transcript.append(TranscriptLine(speaker: .user, text: text))
+            self.appendUserTurn(text)
             self.groundAndRespond(to: text, session: self.client)
         }
 
         client.onSpeechStarted = { [weak self] in
-            // User barged in — stop the assistant immediately.
+            // User barged in — stop the assistant immediately. Not calling
+            // finalizeAssistantTurn() here is deliberate: this is an interrupted,
+            // incomplete reply, not a finished turn, so it's discarded rather than
+            // persisted half-formed (matches web-demo's app.js).
             self?.audio.interruptPlayback()
             self?.client.cancelResponse()
             self?.assistantLineIndex = nil
@@ -310,7 +317,7 @@ final class ConversationViewModel: ObservableObject {
         }
 
         client.onResponseDone = { [weak self] in
-            self?.assistantLineIndex = nil
+            self?.finalizeAssistantTurn()
             self?.setState(.listening)
         }
 
@@ -482,7 +489,7 @@ final class ConversationViewModel: ObservableObject {
     }
 
     private func submitTextSessionMessage(_ text: String) {
-        transcript.append(TranscriptLine(speaker: .user, text: text))
+        appendUserTurn(text)
         textClient.sendUserText(text)
         groundAndRespond(to: text, session: textClient)
     }
@@ -533,7 +540,7 @@ final class ConversationViewModel: ObservableObject {
         }
 
         textClient.onResponseDone = { [weak self] in
-            self?.assistantLineIndex = nil
+            self?.finalizeAssistantTurn()
         }
 
         textClient.onError = { [weak self] message in
@@ -552,5 +559,29 @@ final class ConversationViewModel: ObservableObject {
             transcript.append(TranscriptLine(speaker: .assistant, text: delta))
             assistantLineIndex = transcript.count - 1
         }
+    }
+
+    /// Single append point for every user-turn source (voice transcript, typed,
+    /// dictation) — covers `transcript` (in-memory, for the UI) and
+    /// `conversationHistory` (persisted) in one place, mirroring web-demo's addBubble().
+    private func appendUserTurn(_ text: String) {
+        transcript.append(TranscriptLine(speaker: .user, text: text))
+        conversationHistory.add(speaker: .user, text: text)
+    }
+
+    /// Called once an assistant reply is actually complete (onResponseDone) — captures
+    /// the full accumulated line text before assistantLineIndex gets reset, persists it
+    /// locally and pushes it to AgentNexus (docs/app-design.md 8.4: previously only the
+    /// user's half of the conversation was pushed/stored anywhere at all). Deliberately
+    /// not called from onSpeechStarted's barge-in reset — see that callback's comment.
+    private func finalizeAssistantTurn() {
+        if let index = assistantLineIndex, index < transcript.count {
+            let text = transcript[index].text
+            if !text.isEmpty {
+                conversationHistory.add(speaker: .assistant, text: text)
+                agentNexusClient.pushMessage(text, senderType: "assistant")
+            }
+        }
+        assistantLineIndex = nil
     }
 }

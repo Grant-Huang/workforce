@@ -131,7 +131,31 @@ function addBubble(role, text) {
   row.appendChild(bubble);
   chatEl.appendChild(row);
   chatEl.scrollTop = chatEl.scrollHeight;
+  // User bubbles are always created with their full, final text in one call (unlike
+  // assistant bubbles, which start empty and get filled in via appendToAssistantBubble/
+  // setAssistantFinalText as deltas stream in) -- so this one spot covers every
+  // user-turn source (voice transcript, typed, dictation) for local history. The
+  // matching assistant-turn persistence lives in finalizeAssistantTurn(), once the full
+  // reply text is actually known.
+  if (role === "user" && text) ConversationHistory.add("user", text);
   return bubble;
+}
+
+// Called once an assistant reply is actually complete (response.done) -- captures the
+// full accumulated text before assistantBubbleEl gets reset, persists it locally and
+// pushes it to AgentNexus (docs/app-design.md 8.4: previously only the user's half of
+// the conversation was pushed/stored anywhere at all). Deliberately not called on
+// barge-in (input_audio_buffer.speech_started) -- that's an interrupted, incomplete
+// reply, not a finished turn, so it's just discarded same as before, not persisted
+// half-formed.
+function finalizeAssistantTurn() {
+  const text = assistantBubbleEl ? assistantBubbleEl.textContent : "";
+  if (text) {
+    ConversationHistory.add("assistant", text);
+    AgentNexusBridge.pushMessage(text, "assistant");
+  }
+  assistantBubbleEl = null;
+  assistantHasDelta = false;
 }
 
 function appendToAssistantBubble(delta) {
@@ -493,8 +517,7 @@ function handleServerEvent(json) {
       setState(STATE.LISTENING);
       break;
     case "response.done":
-      assistantBubbleEl = null;
-      assistantHasDelta = false;
+      finalizeAssistantTurn();
       if (state !== STATE.IDLE) setState(STATE.LISTENING);
       break;
     case "error":
@@ -739,8 +762,7 @@ function handleTextSessionEvent(json) {
       setAssistantFinalText(json.text || "");
       break;
     case "response.done":
-      assistantBubbleEl = null;
-      assistantHasDelta = false;
+      finalizeAssistantTurn();
       break;
     case "error":
       statusEl.textContent = `出错：${json.error?.message || "unknown"}`;
