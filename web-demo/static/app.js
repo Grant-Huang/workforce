@@ -43,6 +43,10 @@ let activeSources = [];
 let micAnalyser = null; // taps the mic capture graph, read while LISTENING -- see updateVoiceOrb()
 let playAnalyser = null; // taps the playback graph, read while SPEAKING -- see updateVoiceOrb()
 let orbAnimationId = null;
+// Playback scheduling margin ahead of playCtx.currentTime (see playPCM16Chunk) and the
+// fade applied at each chunk's edges -- both explained where they're used below.
+const PLAYBACK_LOOKAHEAD_SEC = 0.08;
+const CHUNK_FADE_SEC = 0.003;
 let assistantBubbleEl = null;
 let assistantHasDelta = false;
 let voice = "Serena";
@@ -274,6 +278,30 @@ function setupPlayback() {
   playAnalyser.fftSize = 256;
 }
 
+// Real-device testing (2026-08-24) found clicking ("哒哒哒") recurring later in long
+// assistant responses even after the native-sample-rate fix above. Root cause: this
+// function used to schedule each chunk at `Math.max(nextPlayTime, currentTime)` -- fine
+// while nextPlayTime stays comfortably ahead of currentTime, but network jitter or a GC
+// pause can let currentTime catch up to nextPlayTime with zero margin left. From that
+// point on, every chunk that arrives even slightly late snaps straight to currentTime,
+// which means the previous chunk's buffer has *already* finished playing and the output
+// has gone to silence before this one starts -- a hard silence-to-signal edge, which is
+// exactly what a "click" is. It doesn't happen at the start of a response (there's
+// nothing to fall behind yet) or on a fast/idle network (nextPlayTime never gets caught),
+// which matches "shows up partway through longer turns" rather than every time.
+//
+// Two independent fixes, both cheap:
+// - A small lookahead margin (PLAYBACK_LOOKAHEAD_SEC) whenever scheduling would otherwise
+//   catch down to currentTime -- gives a late-arriving next chunk room to land on time
+//   instead of underrunning. Applies uniformly to the first chunk of a response too
+//   (nextPlayTime starts at/near 0 there), which doubles as the "buffer ~80ms before
+//   playing" jitter-buffer behavior.
+// - A short linear fade-in/out per chunk (CHUNK_FADE_SEC) via a GainNode, so even a
+//   residual few-sample misalignment at a chunk boundary (adjacent chunks are arbitrary
+//   cut points in a continuous waveform, not guaranteed to meet at a zero-crossing) is
+//   smoothed instead of an audible discontinuity.
+// Not acoustically re-verified in this sandbox (no real audio hardware here, same caveat
+// as the fixes above) -- needs real-device confirmation.
 function playPCM16Chunk(base64) {
   const int16 = base64ToInt16(base64);
   const float32 = new Float32Array(int16.length);
@@ -284,10 +312,21 @@ function playPCM16Chunk(base64) {
 
   const source = playCtx.createBufferSource();
   source.buffer = buffer;
-  source.connect(playDestNode);
-  if (playAnalyser) source.connect(playAnalyser);
 
-  const startAt = Math.max(nextPlayTime, playCtx.currentTime);
+  const gain = playCtx.createGain();
+  source.connect(gain);
+  gain.connect(playDestNode);
+  if (playAnalyser) gain.connect(playAnalyser);
+
+  const caughtUp = nextPlayTime <= playCtx.currentTime;
+  const startAt = caughtUp ? playCtx.currentTime + PLAYBACK_LOOKAHEAD_SEC : nextPlayTime;
+
+  const fade = Math.min(CHUNK_FADE_SEC, buffer.duration / 2);
+  gain.gain.setValueAtTime(0, startAt);
+  gain.gain.linearRampToValueAtTime(1, startAt + fade);
+  gain.gain.setValueAtTime(1, startAt + buffer.duration - fade);
+  gain.gain.linearRampToValueAtTime(0, startAt + buffer.duration);
+
   source.start(startAt);
   nextPlayTime = startAt + buffer.duration;
 
