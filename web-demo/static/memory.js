@@ -8,13 +8,27 @@
 // docs/agentnexus-memory-integration-proposal.md — AgentNexusBridge (agentnexus.js)
 // pulls into / pushes out of this same store in the background; the live conversation
 // only ever touches this local object, never the network.
+// Known values for an entry's `source` field -- deliberately a plain string, not a
+// fixed enum (docs/app-design.md 7.2/roadmap-todo.md's "记忆" section: meant to grow to
+// cover future source systems without a code change here every time one's added).
+const MemorySource = {
+  LOCAL: "local", // produced on this device, not yet confirmed synced anywhere
+  AGENTNEXUS: "agentnexus", // pulled from AgentNexus's channel memory API
+  UNKNOWN: "unknown", // entries persisted before `source` existed -- see load()
+};
+
 const LocalMemory = (() => {
   const STORAGE_KEY = "voicechat.localMemory.v1";
 
   function load() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : [];
+      const parsed = raw ? JSON.parse(raw) : [];
+      // Entries saved before `source` existed have no such key at all. Defaulting
+      // those to "unknown" rather than "local" is deliberate -- "local" implies "not
+      // yet confirmed synced", which we can't actually claim for entries that, for all
+      // we know, already went through the old fire-and-forget push path.
+      return parsed.map((e) => (e.source ? e : { ...e, source: MemorySource.UNKNOWN }));
     } catch (e) {
       return [];
     }
@@ -42,15 +56,26 @@ const LocalMemory = (() => {
   }
 
   return {
-    /** @param {string} text @param {object} [meta] e.g. {source: "agentnexus", layer: "ANCHOR"} */
+    /**
+     * @param {string} text
+     * @param {object} [meta] e.g. {source: "agentnexus", sourceId: "entry_abc", layer: "ANCHOR"}.
+     *   Defaults to source: "local" (see MemorySource.LOCAL) when the caller doesn't
+     *   specify one -- every raw dialogue turn stored via a bare `add(text)` call is
+     *   produced on this device, so that default is correct, not a placeholder.
+     */
     add(text, meta = {}) {
       const trimmed = (text || "").trim();
       if (trimmed.length < 2) return;
-      entries.push({ id: crypto.randomUUID(), text: trimmed, timestamp: Date.now(), ...meta });
+      entries.push({ id: crypto.randomUUID(), text: trimmed, timestamp: Date.now(), source: MemorySource.LOCAL, ...meta });
       persist(entries);
     },
 
-    /** Bulk-merge entries pulled from AgentNexus without duplicating by id. */
+    /**
+     * Bulk-merge entries pulled from AgentNexus without duplicating by id.
+     * Phase 1 scope note (docs/roadmap-todo.md): this only stores the `sourceId` field
+     * callers now pass in -- the dedup-by-`id` logic itself is unchanged on purpose.
+     * Phase 2 is what replaces this with a real upsert keyed on (source, sourceId).
+     */
     merge(remoteEntries) {
       const existingIds = new Set(entries.map((e) => e.id));
       for (const e of remoteEntries) {

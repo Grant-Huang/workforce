@@ -192,6 +192,44 @@ App 里实际上有三种不同的"用户怎么把话传给模型"的方式，�
 - **黑话词典作为这次调用的背景信息一起传入**——把 7.1/7.2 的纠偏需求和这一步的提炼需求合成同一次调用，不是两个独立机制。
 - **原始转写仍然要保留一份可追溯的底稿**（跟"记忆"讨论里"本机暂存区"的滚动窗口是同一份数据，不是额外新增的存储）——提炼是加工，不是替换，万一发现提炼版本有问题，能回去对照原文核实。
 
+## 八、会话状态机拆分：文本会话 vs 语音会话（2026-08-23 讨论收敛，并入阶段 2）
+
+### 8.1 现状问题（用户网页版实测发现）
+
+现在两端都只有**一套**连接/状态机（web 的 `ws`/`STATE`，iOS 的 `ConversationViewModel`/`RealtimeClient`）：`sendTextMessage()`/`sendText(_:)` 在空闲时会调用 `start()`——而 `start()` 就是建立完整实时语音连接的函数：打开麦克风、持续推流、状态机走 CONNECTING→LISTENING→SPEAKING、回复用语音播放。也就是说，**现在打字发消息，麦克风真的会被打开，回复也真的是语音播放的**，界面会显示"正在聆听…"——文本会话和语音会话名义上是两种入口，实际上共用同一条腿，边界从设计上就没分开过。
+
+### 8.2 决定：彻底拆成两套独立的会话/状态机
+
+- **文本会话（Text Session）**：入口包括打字 和 口述转文字（口述本身已经是独立连接，见 3.1/3.4；这里说的是它产出的文字进入哪个会话）。**彻底不碰麦克风、不碰 TTS**：不调用 `AudioIOManager`/`getUserMedia`，不建立音频采集管线；回复**只要文字**，界面全程不出现"正在聆听"这类暗示麦克风常开的状态。
+- **语音会话（Voice Session）**：现在的实时语音对话模式，不变——只是从此只服务"点麦克风"这一个入口，不再被打字/口述转文字复用。
+
+两者是**两个独立的连接持有者**，各自一个状态机、各自的 `RealtimeClient`/`ws` 实例——跟 `DictationViewModel` 当初刻意跟 `ConversationViewModel` 分开管理是同一条原则（避免两套状态机纠缠），这次是把这条原则从"口述 vs 对话"扩展到"文本会话 vs 语音会话"这一层。
+
+**技术实现方向**：文本会话依然复用 Realtime WebSocket 这套协议机制（不是切换成一次性 HTTP 补全调用）——原因是现有的记忆检索/注入逻辑（`groundAndRespond`/`handleUserTurn`：查记忆→`session.update` patch instructions→`response.create`）是深度绑定在 Realtime 协议上的，改用无状态的 HTTP 补全调用意味着要把这套逻辑重写一遍（每次请求都要带上完整上下文，因为没有"会话"可以 patch 了），成本远大于收益。文本会话的连接只是**不接麦克风、不采集音频**，并且把 `session.update.modalities` 设成只有 `["text"]`（不含 `"audio"`），让服务端从会话层面就不生成语音——**已实测确认（2026-08-23）**：直接连真实 `qwen3.5-omni-flash-realtime` 测过，`session.update.modalities: ["text"]` 被服务端接受并正确回显，产生的回复完全不含任何音频相关事件（`response.audio.delta`、`response.audio_transcript.*` 一个都不出现，`got_audio_event: False`），协议其余部分照常工作——事件序列是 `conversation.item.created` → `response.created` → `response.output_item.added` → `conversation.item.created` → `response.content_part.added` → `response.text.delta`（×N）→ `response.text.done` → `response.content_part.done` → `response.output_item.done` → `response.done`，回复通过全新的一对事件 `response.text.delta`/`response.text.done` 返回（不是语音会话用的 `response.audio_transcript.*`）。web 端已经按这个实测结果实现并通过 Playwright 端到端验证，详见下面 8.5 和 `roadmap-todo.md`。
+
+**口述转文字的"直接发"路径要改指向**：web 端的 `promoteDictationConnection`/iOS 端 `DictationViewModel.finishForDirectSend()` + `ConversationViewModel.sendText(_:reusing:)` 原本是把口述连接过户给"语音会话"（会打开麦克风、说出语音回复）——这跟新设计矛盾。**两端都已改成过户给"文本会话"**（web 的 `promoteDictationConnectionToTextSession`、iOS 的 `sendTextSessionMessage(_:reusingDictationClient:)`），其实**更贴合口述连接本来的性质**：口述连接从录音开始就没有"持续开麦、语音回复"这些语义（`create_response:false`，只转写），过户给"文本会话"只需要 patch `instructions` + 确保 `modalities` 是纯文字，不需要额外接麦克风——比过户给"语音会话"更自然，不是额外负担。
+
+### 8.3 共享的会话记录空间 + 语音会话的展示方式
+
+- 文本会话和语音会话**共用同一份会话历史**（这次对话从头到尾说了什么，是连续的一份记录，不因为中途从打字切到语音对话就分裂成两段）——两个 session 各自往同一个共享的历史结构里追加内容，而不是像现在这样，转写记录本质上是"语音会话状态机自己的产物"（iOS 的 `transcript`/web 的 `chatEl`，都挂在会话状态机对象上）。这意味着历史需要挪到一个独立于两个 session 之外的地方持有。
+- **语音会话进行中，不展示文字转写**，改成一个有科技感的动效球（浅蓝色，随音量/频率变化，可以用 `AnalyserNode`（web）/对音频采集的原始采样做简单的音量分析（iOS）来驱动）。语音会话结束后，这段对话的转写才"揭示"进共享的历史记录里，跟文本会话的消息一起展示。
+- 这条排在文本会话状态机拆分之后实现——现在转写展示逻辑是跟语音会话状态机绑在一起的，拆开之后才好单独控制"语音会话时不展示转写"，顺序上有依赖，不能先做这个。
+
+### 8.4 会话历史怎么保存（用户提问，现状确认为"丢失"）
+
+查证结果：现在**只有用户说的话**会推送到智枢（`AgentNexusBridge.pushMessage`/等价的 iOS 调用），而且是 fire-and-forget、不确认成功；**助手的回复完全没有被保存到任何地方**——不推送智枢，本地 `LocalMemory`/`MemoryStore` 也不存；**完整的会话记录本身**（带着"谁说的、什么时候、按什么顺序"这层结构的转写）现在完全没有持久化，纯内存态，刷新页面/杀掉 App 就没了。这跟"记忆"（`LocalMemory`/`MemoryStore` 里被检索用的片段）是两个不同粒度的东西：记忆是抽取出来的片段，会话记录是完整对话本身。
+
+**这次一并解决的方案**：
+- **助手回复也推送到 AgentNexus 的消息记录**：复用已有的 `pushMessage`（web）/等价的 iOS 调用，带 `senderType: "assistant"`，跟用户消息走同一条已有的接口，不需要新接口。
+- **本地持久化完整的会话历史**：独立于 `LocalMemory`/`MemoryStore`（那是"记忆片段"，这是"完整对话记录"），需要一个新的、简单的本地存储（结构上类似 `MemoryStore`，但存的是带顺序、带说话人的完整轮次，不做检索、不做筛选）。
+
+### 8.5 实施顺序（并入阶段 2，不单独插队）
+
+1. 文本会话/语音会话状态机拆分——**web 端已完成并通过 Playwright 验证（2026-08-23）**：`modalities: ["text"]` 已实测确认能让服务端不生成语音，口述"直接发"过户到文本会话已验证正确工作。**iOS 端已完成 port（2026-08-24）**：`RealtimeModels.swift`/`RealtimeClient.swift` 加了 `modalities` 参数 + `response.text.delta`/`response.text.done` 支持（复用 web 已验证的协议结论，不重复实测）；`ConversationViewModel.swift` 拆出独立的 `textClient`/`TextSessionState`，`groundAndRespond` 改成按 `session: RealtimeClient` 参数化；`ConversationView.swift` 加了三方互斥的按钮禁用状态。这个环境没有 Swift 工具链，只做了源码改动 + 手工括号配对检查，**完全没有编译或真机验证过**，需要用户在 Xcode 里编译并实测。
+2. 共享历史结构 + 助手回复推送 AgentNexus + 本地持久化
+3. 语音会话进行中隐藏转写 + 展示动效球（依赖第 1 步先完成）
+4. 动效球的具体视觉效果（`AnalyserNode`/音量驱动的动画）——这条本身工作量不小，是一个独立的小型 UI 组件，先做出能跑的版本（哪怕视觉效果朴素），细致打磨可以晚一点
+
 ## 参考
 
 - 用户提供的参考截图：ChatGPT / Grok iOS App 界面（本次对话内）

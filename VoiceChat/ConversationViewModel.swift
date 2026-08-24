@@ -10,6 +10,17 @@ enum ConversationState {
     case error(String)
 }
 
+/// State machine for the text session (typing + dictation-to-text), fully independent
+/// from `ConversationState` (the mic-tap live-voice session) — see the "会话状态机拆分"
+/// discussion in docs/app-design.md section 8 and docs/roadmap-todo.md. The text session
+/// never touches the microphone or TTS; there's no "connecting → listening →
+/// assistantSpeaking" cycle here because there's nothing to listen for or speak.
+enum TextSessionState: Equatable {
+    case idle
+    case connecting
+    case ready
+}
+
 struct TranscriptLine: Identifiable {
     let id = UUID()
     let speaker: Speaker
@@ -28,11 +39,24 @@ struct SuggestionChip: Identifiable {
 final class ConversationViewModel: ObservableObject {
     @Published private(set) var state: ConversationState = .idle
     @Published private(set) var transcript: [TranscriptLine] = []
+    @Published private(set) var textState: TextSessionState = .idle
+    /// Surfaces text-session connect timeouts / disconnects to the UI — kept separate
+    /// from `state`'s `.error` case on purpose: the text session must never touch the
+    /// voice session's status label (that label is exactly what must never show
+    /// "正在聆听"-style text for a text turn). Mirrors `DictationViewModel.errorMessage`.
+    @Published var textSessionError: String?
 
     private let audio = AudioIOManager()
     private var client = RealtimeClient()
+    /// The text session's own connection — fully independent from `client` (the voice
+    /// session's). See `TextSessionState` and docs/app-design.md section 8.
+    private var textClient = RealtimeClient()
     let memoryStore = MemoryStore()
     private let agentNexusClient = AgentNexusClient()
+    /// Shared between the voice and text sessions' streaming-reply-line building —
+    /// safe only because the two sessions are mutually exclusive (`ConversationView`
+    /// disables each one's entry points while the other is active), same as
+    /// web-demo/static/app.js's shared `assistantBubbleEl`/`assistantHasDelta`.
     private var assistantLineIndex: Int?
 
     // ---- connection lifecycle (ported from web-demo/static/app.js, 2026-08-22) ----
@@ -45,10 +69,13 @@ final class ConversationViewModel: ObservableObject {
     private static let idleTimeoutSeconds: UInt64 = 5 * 60
     private var connectTimeoutTask: Task<Void, Never>?
     private var idleTimeoutTask: Task<Void, Never>?
-    /// Set when the user asks to send a text message while idle — `start()` needs a
-    /// running session before the message can actually go out, so this is submitted
-    /// once the session becomes ready rather than sent immediately.
-    private var pendingTextOnReady: String?
+    /// Set when the user asks to send a text message while the text session is idle —
+    /// `startTextSession()` needs a running session before the message can actually go
+    /// out, so this is submitted once the session becomes ready rather than sent
+    /// immediately.
+    private var pendingTextSessionMessage: String?
+    private var textConnectTimeoutTask: Task<Void, Never>?
+    private var textIdleTimeoutTask: Task<Void, Never>?
     private var foregroundObserver: NSObjectProtocol?
 
     init() {
@@ -97,6 +124,16 @@ final class ConversationViewModel: ObservableObject {
         }
     }
 
+    /// Mutual exclusion across the three input modes (voice session / text session /
+    /// dictation) — only one may be active at a time, because the voice and text
+    /// sessions share `assistantLineIndex` (the streaming-reply-line builder); a
+    /// concurrent reply from both would corrupt each other's line. Used to gate
+    /// starting the voice session or dictation while the text session is connected.
+    /// Mirrors web-demo/static/app.js's equivalent rule.
+    var isTextSessionIdle: Bool {
+        textState == .idle
+    }
+
     /// 0-1 time-based suggestions shown in the empty state (before any turns) —
     /// restrained on purpose: no auto-speak, no auto-connect, just a tappable prompt.
     /// Mirrors web-demo/static/app.js's `getTimeSuggestions`.
@@ -137,12 +174,7 @@ final class ConversationViewModel: ObservableObject {
             instructions: systemInstructions,
             voice: RealtimeConfigStore.voice
         ) { [weak self] in
-            guard let self else { return }
-            self.setState(.listening)
-            if let pending = self.pendingTextOnReady {
-                self.pendingTextOnReady = nil
-                self.submitUserText(pending)
-            }
+            self?.setState(.listening)
         }
 
         // Belt-and-suspenders for rule (a): if the socket opens but the session never
@@ -155,60 +187,6 @@ final class ConversationViewModel: ObservableObject {
         // Pull-sync from AgentNexus in the background — short REST call, not on the
         // conversation's critical path. If it fails or is slow, the conversation just
         // proceeds with whatever's already in the local cache from last time.
-        pullMemoryInBackground()
-    }
-
-    /// Like `sendText(_:)`, but reuses an already-open, already-handshaken
-    /// `RealtimeClient` (handed off by `DictationViewModel.finishForDirectSend()`)
-    /// instead of calling `start()` to open + handshake a brand new one. The dictation
-    /// connection is the same kind of connection this uses — same relay, same
-    /// protocol, same `session.update` shape — just configured with empty instructions
-    /// and never told to `response.create`, so promoting it only needs one lightweight
-    /// instructions patch, not a full reconnect. Mirrors web-demo/static/app.js's
-    /// promoteDictationConnection / sendCleanedDictationText — see
-    /// docs/app-design.md section 3.4 for the latency measured on the web side (this
-    /// iOS port is unverified, same caveat as the rest of this feature).
-    func sendText(_ text: String, reusing reusableClient: RealtimeClient) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            reusableClient.disconnect()
-            return
-        }
-        guard case .idle = state else {
-            // A live conversation is already connected some other way -- can't reuse a
-            // second connection alongside it. Close the handed-off one and fall back
-            // to the normal path.
-            reusableClient.disconnect()
-            sendText(trimmed)
-            return
-        }
-        guard let apiKey = APIKeyStore.load(), !apiKey.isEmpty else {
-            reusableClient.disconnect()
-            setState(.error("请先在设置里填入 API Key"))
-            return
-        }
-
-        setState(.connecting)
-        client = reusableClient
-        wireCallbacks()
-
-        do {
-            try audio.start()
-        } catch {
-            setState(.error("麦克风启动失败：\(error.localizedDescription)"))
-            return
-        }
-
-        // The dictation session was already configured with the same voice/
-        // turn_detection as a live conversation -- only `instructions` differs (empty
-        // vs systemInstructions) -- so this one-field patch is all promoting it needs.
-        client.updateInstructions(systemInstructions) { [weak self] in
-            guard let self else { return }
-            self.setState(.listening)
-            self.submitUserText(trimmed)
-        }
-
-        armConnectTimeout()
         pullMemoryInBackground()
     }
 
@@ -228,17 +206,16 @@ final class ConversationViewModel: ObservableObject {
             guard let self, AgentNexusConfigStore.isConfigured else { return }
             guard let entries = try? await self.agentNexusClient.fetchMemoryEntries() else { return }
             let formatter = ISO8601DateFormatter()
-            let mapped = entries.map { entry -> (text: String, timestamp: Date) in
+            let mapped = entries.map { entry -> (text: String, timestamp: Date, sourceId: String) in
                 let text = entry.title.map { "\($0)：\(entry.content)" } ?? entry.content
                 let date = entry.updatedAt.flatMap { formatter.date(from: $0) } ?? Date()
-                return (text, date)
+                return (text, date, entry.entryId)
             }
             self.memoryStore.merge(remoteEntries: mapped)
         }
     }
 
     func stop(reason: String? = nil) {
-        pendingTextOnReady = nil
         client.disconnect()
         audio.stop()
         setState(reason.map { .error($0) } ?? .idle)
@@ -269,26 +246,6 @@ final class ConversationViewModel: ObservableObject {
         }
     }
 
-    /// Shared by the mic-driven voice turn path and the typed/dictated text path.
-    /// Starts the session first if needed — see `pendingTextOnReady`.
-    func sendText(_ text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        switch state {
-        case .idle, .error:
-            pendingTextOnReady = trimmed
-            start()
-        default:
-            submitUserText(trimmed)
-        }
-    }
-
-    private func submitUserText(_ text: String) {
-        transcript.append(TranscriptLine(speaker: .user, text: text))
-        client.sendUserText(text)
-        groundAndRespond(to: text)
-    }
-
     private func wireCallbacks() {
         audio.onCapturedChunk = { [weak self] data in
             self?.client.sendAudioChunk(data)
@@ -313,7 +270,7 @@ final class ConversationViewModel: ObservableObject {
         client.onUserTranscript = { [weak self] text in
             guard let self, !text.isEmpty else { return }
             self.transcript.append(TranscriptLine(speaker: .user, text: text))
-            self.groundAndRespond(to: text)
+            self.groundAndRespond(to: text, session: self.client)
         }
 
         client.onSpeechStarted = { [weak self] in
@@ -330,13 +287,11 @@ final class ConversationViewModel: ObservableObject {
         }
 
         client.onError = { [weak self] message in
-            self?.pendingTextOnReady = nil
             self?.setState(.error(message))
         }
 
         client.onDisconnect = { [weak self] error in
             guard let self else { return }
-            self.pendingTextOnReady = nil
             if let error {
                 self.setState(.error(error.localizedDescription))
             } else {
@@ -360,7 +315,12 @@ final class ConversationViewModel: ObservableObject {
     /// AgentNexus's structured memory layers (not just the raw message log every turn
     /// gets) and skips memory retrieval — it's a command, not a question, so the model
     /// just needs to briefly confirm rather than search-and-answer.
-    private func groundAndRespond(to userText: String) {
+    ///
+    /// Parameterized by `session` (the voice session's `client`, or the text session's
+    /// `textClient`) so this grounding logic — the actually delicate part — isn't
+    /// duplicated between the two, mirroring web-demo/static/app.js's
+    /// `handleUserTurn(text, session)`.
+    private func groundAndRespond(to userText: String, session: RealtimeClient) {
         agentNexusClient.pushMessage(userText)
 
         if let saveIntent = SaveIntent.detect(userText) {
@@ -370,8 +330,8 @@ final class ConversationViewModel: ObservableObject {
             }
             let instructions = systemInstructions
                 + "\n\n用户刚才明确要求记住这件事：\"\(saveIntent.content)\"，你已经帮TA记下了。只需要简短确认一句就行，不要复述内容、不要追问。"
-            client.updateInstructions(instructions) { [weak self] in
-                self?.client.requestResponse()
+            session.updateInstructions(instructions) {
+                session.requestResponse()
             }
             return
         }
@@ -387,8 +347,173 @@ final class ConversationViewModel: ObservableObject {
             instructions += "\n\n以下是用户过去说过、可能相关的内容，如果有帮助请参考：\n" + lines.joined(separator: "\n")
         }
 
-        client.updateInstructions(instructions) { [weak self] in
-            self?.client.requestResponse()
+        session.updateInstructions(instructions) {
+            session.requestResponse()
+        }
+    }
+
+    // ---- text session (typing + dictation-to-text; ported from
+    // web-demo/static/app.js's textWs/TEXT_STATE, 2026-08-23) ----
+    //
+    // Fully independent connection/state machine from the voice session above: never
+    // calls `audio.start()`, never touches the microphone, and its `session.update` is
+    // configured with `modalities: ["text"]` only — verified live against the real API
+    // to fully suppress all audio-related server events (see docs/app-design.md
+    // section 8). This is what fixes the real bug where typing a message opened the
+    // microphone and played a spoken reply: typed/dictated input now never reaches
+    // `client`/`state` at all.
+
+    /// Entry point for typed messages (and the time-based suggestion chips). Starts the
+    /// text session first if needed — see `pendingTextSessionMessage`.
+    func sendTextSessionMessage(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        switch textState {
+        case .idle:
+            pendingTextSessionMessage = trimmed
+            startTextSession()
+        default:
+            submitTextSessionMessage(trimmed)
+        }
+    }
+
+    /// Entry point for dictation's "direct send" — reuses the already-open,
+    /// already-handshaken `RealtimeClient` handed off by
+    /// `DictationViewModel.finishForDirectSend()` instead of opening a second
+    /// connection. The dictation connection was already configured with
+    /// `modalities: ["text"]` and no spoken reply (see `DictationViewModel.start()`),
+    /// which is the same configuration the text session itself uses — so promoting it
+    /// only needs one lightweight `instructions` patch, not a modality change or a full
+    /// reconnect. Mirrors web-demo/static/app.js's
+    /// `promoteDictationConnectionToTextSession`.
+    func sendTextSessionMessage(_ text: String, reusingDictationClient reusableClient: RealtimeClient) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            reusableClient.disconnect()
+            return
+        }
+        guard case .idle = textState else {
+            // A text session is already connected some other way -- can't reuse a
+            // second connection alongside it. Close the handed-off one and fall back
+            // to the normal path.
+            reusableClient.disconnect()
+            sendTextSessionMessage(trimmed)
+            return
+        }
+
+        setTextState(.connecting)
+        textClient = reusableClient
+        wireTextCallbacks()
+
+        textClient.updateInstructions(systemInstructions) { [weak self] in
+            guard let self else { return }
+            self.setTextState(.ready)
+            self.submitTextSessionMessage(trimmed)
+        }
+
+        armTextConnectTimeout()
+        pullMemoryInBackground()
+    }
+
+    private func startTextSession() {
+        guard case .idle = textState else { return }
+        guard let apiKey = APIKeyStore.load(), !apiKey.isEmpty else {
+            pendingTextSessionMessage = nil
+            textSessionError = "请先在设置里填入 API Key"
+            return
+        }
+
+        setTextState(.connecting)
+        wireTextCallbacks()
+
+        textClient.connect(
+            baseURL: RealtimeConfigStore.effectiveBaseURL,
+            apiKey: apiKey,
+            model: RealtimeConfigStore.model,
+            instructions: systemInstructions,
+            voice: RealtimeConfigStore.voice,
+            modalities: ["text"]
+        ) { [weak self] in
+            guard let self else { return }
+            self.setTextState(.ready)
+            if let pending = self.pendingTextSessionMessage {
+                self.pendingTextSessionMessage = nil
+                self.submitTextSessionMessage(pending)
+            }
+        }
+
+        armTextConnectTimeout()
+        pullMemoryInBackground()
+    }
+
+    func stopTextSession(reason: String? = nil) {
+        pendingTextSessionMessage = nil
+        textClient.disconnect()
+        setTextState(.idle)
+        textSessionError = reason
+    }
+
+    private func submitTextSessionMessage(_ text: String) {
+        transcript.append(TranscriptLine(speaker: .user, text: text))
+        textClient.sendUserText(text)
+        groundAndRespond(to: text, session: textClient)
+    }
+
+    private func armTextConnectTimeout() {
+        textConnectTimeoutTask?.cancel()
+        textConnectTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.connectTimeoutSeconds * 1_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            if case .connecting = self.textState {
+                self.stopTextSession(reason: "连接超时，请重试")
+            }
+        }
+    }
+
+    /// Mirrors `setState`'s timer bookkeeping, for the text session's own idle/connect
+    /// timers. `.ready` is the text-session equivalent of `.listening` — "connected,
+    /// nothing pending" — the only state that counts toward the idle-disconnect clock.
+    private func setTextState(_ next: TextSessionState) {
+        textState = next
+        if case .ready = next {
+            textIdleTimeoutTask?.cancel()
+            textIdleTimeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: Self.idleTimeoutSeconds * 1_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                self.stopTextSession(reason: "长时间没有新消息，已自动断开")
+            }
+        } else {
+            textIdleTimeoutTask?.cancel()
+            textIdleTimeoutTask = nil
+        }
+        if case .connecting = next {} else {
+            textConnectTimeoutTask?.cancel()
+            textConnectTimeoutTask = nil
+        }
+    }
+
+    private func wireTextCallbacks() {
+        textClient.onTextDelta = { [weak self] text in
+            self?.appendToAssistantLine(text)
+        }
+
+        textClient.onTextDone = { [weak self] text in
+            // Fallback for providers that only send the final text, no deltas.
+            guard let self, self.assistantLineIndex == nil, !text.isEmpty else { return }
+            self.transcript.append(TranscriptLine(speaker: .assistant, text: text))
+            self.assistantLineIndex = self.transcript.count - 1
+        }
+
+        textClient.onResponseDone = { [weak self] in
+            self?.assistantLineIndex = nil
+        }
+
+        textClient.onError = { [weak self] message in
+            self?.stopTextSession(reason: message)
+        }
+
+        textClient.onDisconnect = { [weak self] error in
+            self?.stopTextSession(reason: error?.localizedDescription)
         }
     }
 
