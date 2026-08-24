@@ -45,6 +45,11 @@ final class ConversationViewModel: ObservableObject {
     /// voice session's status label (that label is exactly what must never show
     /// "正在聆听"-style text for a text turn). Mirrors `DictationViewModel.errorMessage`.
     @Published var textSessionError: String?
+    /// RMS level (mic input while `.listening`, playback while `.assistantSpeaking`)
+    /// driving `ConversationView.voiceOrbView` — see docs/app-design.md 8.3. Only
+    /// meaningful while `state` is one of those two cases; `wireCallbacks()` guards
+    /// each callback so a stale reading from the other source never leaks through.
+    @Published private(set) var orbLevel: Double = 0
 
     private let audio = AudioIOManager()
     private var client = RealtimeClient()
@@ -229,6 +234,13 @@ final class ConversationViewModel: ObservableObject {
     /// anything else (still connecting, assistant talking, idle) clears it.
     private func setState(_ next: ConversationState) {
         state = next
+        // .listening and .assistantSpeaking each drive orbLevel from their own source
+        // (see wireCallbacks' onInputLevel/onOutputLevel); every other state has no
+        // live audio to reflect, so reset it rather than leaving a stale reading.
+        switch next {
+        case .listening, .assistantSpeaking: break
+        default: orbLevel = 0
+        }
         if case .listening = next {
             idleTimeoutTask?.cancel()
             idleTimeoutTask = Task { [weak self] in
@@ -249,6 +261,22 @@ final class ConversationViewModel: ObservableObject {
     private func wireCallbacks() {
         audio.onCapturedChunk = { [weak self] data in
             self?.client.sendAudioChunk(data)
+        }
+
+        // Fired on an audio thread -- hop to the main actor before touching @Published
+        // state. Guarded by `state` so a reading from the "wrong" source (e.g. leftover
+        // playback level right after a barge-in) never briefly drives the orb.
+        audio.onInputLevel = { [weak self] level in
+            Task { @MainActor [weak self] in
+                guard let self, case .listening = self.state else { return }
+                self.orbLevel = Double(level)
+            }
+        }
+        audio.onOutputLevel = { [weak self] level in
+            Task { @MainActor [weak self] in
+                guard let self, case .assistantSpeaking = self.state else { return }
+                self.orbLevel = Double(level)
+            }
         }
 
         client.onAudioDelta = { [weak self] data in
