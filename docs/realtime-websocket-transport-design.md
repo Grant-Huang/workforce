@@ -1,6 +1,6 @@
 # RealtimeClient 底层传输选型设计文档
 
-状态：草案，等待确认后再实现。
+状态：已按第 4 节方案实现（`RealtimeClient.swift` + `project.yml`），**尚未本地编译验证、未真机测试**——这次改动的 API 层级比之前几次都低，务必先跑一遍 `xcodegen generate` + 编译再上真机，不要重复"合并了才发现问题"的循环。已知未解决的问题：`[handshake HTTP xxx]` 诊断（#12/#15）在这次重写里丢失了，NIO 的 `NIOTypedWebSocketClientUpgrader` 没有直接暴露被拒绝时的真实状态码，见 `RealtimeClient.swift` 里 `openWebSocket` 的 `.notUpgraded` 分支注释。
 
 ## 1. 背景：问题的来龙去脉
 

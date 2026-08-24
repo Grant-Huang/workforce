@@ -5,12 +5,19 @@ options:
     iOS: "17.0"
   createIntermediateGroups: true
 packages:
-  # Swaps RealtimeClient off URLSessionWebSocketTask -- see the doc comment on
-  # RealtimeClient for why (a real-device HTTP/2-ALPN incompatibility with
-  # Aliyun's realtime endpoint that URLSessionWebSocketTask couldn't get past).
-  Starscream:
-    url: https://github.com/daltoniam/Starscream.git
-    from: 4.0.8
+  # Swaps RealtimeClient off URLSessionWebSocketTask/Starscream -- see the doc comment
+  # on RealtimeClient and docs/realtime-websocket-transport-design.md for why (a
+  # real-device HTTP/2-ALPN incompatibility neither of those could get past; NIOTS
+  # gives explicit control over ALPN via NWProtocolTLS.Options).
+  NIOTransportServices:
+    url: https://github.com/apple/swift-nio-transport-services.git
+    from: 1.28.0
+  # Transitive dependency of NIOTransportServices, but its NIOCore/NIOHTTP1/NIOWebSocket
+  # products are imported directly in RealtimeClient.swift, so SPM needs them listed
+  # explicitly as target dependencies too.
+  SwiftNIO:
+    url: https://github.com/apple/swift-nio.git
+    from: 2.101.0
 targets:
   VoiceChat:
     type: application
@@ -20,7 +27,14 @@ targets:
     info:
       path: VoiceChat/Info.plist
     dependencies:
-      - package: Starscream
+      - package: NIOTransportServices
+        product: NIOTransportServices
+      - package: SwiftNIO
+        product: NIOCore
+      - package: SwiftNIO
+        product: NIOHTTP1
+      - package: SwiftNIO
+        product: NIOWebSocket
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jacer.voicechat
