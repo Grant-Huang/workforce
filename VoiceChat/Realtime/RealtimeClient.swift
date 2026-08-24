@@ -141,8 +141,17 @@ final class RealtimeClient: NSObject {
         let bootstrap = NIOTSConnectionBootstrap(group: group)
             .tlsOptions(http1OnlyTLSOptions())
 
+        // NOTE: unlike the ClientBootstrap-based reference example (Sources/
+        // NIOWebSocketClient in apple/swift-nio), NIOTSConnectionBootstrap has no sync
+        // `connect(host:port:channelInitializer:)` overload -- only the async one used
+        // below, which returns `Output` directly (already unwrapped once), not
+        // `EventLoopFuture<Output>`. So `channelInitializer` here returns
+        // `EventLoopFuture<UpgradeResult>` directly (single-wrapped) rather than nesting
+        // it inside another `channel.eventLoop.makeCompletedFuture { }` the way the
+        // ClientBootstrap example does -- that nested form doesn't type-check against
+        // this async API (caught by a real build failure, not guessed).
         let upgradeResult: UpgradeResult = try await bootstrap.connect(host: host, port: port) { channel in
-            channel.eventLoop.makeCompletedFuture {
+            do {
                 let upgrader = NIOTypedWebSocketClientUpgrader<UpgradeResult>(
                     upgradePipelineHandler: { channel, _ in
                         channel.eventLoop.makeCompletedFuture {
@@ -170,6 +179,8 @@ final class RealtimeClient: NSObject {
                 return try channel.pipeline.syncOperations.configureUpgradableHTTPClientPipeline(
                     configuration: .init(upgradeConfiguration: upgradeConfiguration)
                 )
+            } catch {
+                return channel.eventLoop.makeFailedFuture(error)
             }
         }
 
