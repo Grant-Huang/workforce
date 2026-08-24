@@ -16,11 +16,27 @@
 // See app.js's setupPlayback()/playPCM16Chunk() for how chunks get here (base64 PCM16 ->
 // Float32 -> resampled to the AudioContext's native rate on the main thread, since this
 // processor has no resampler of its own).
+//
+// 2026-08-24, round 2: real-device testing found a click specifically at the *end* of
+// each assistant turn (not mid-stream). Root cause: this file originally jumped straight
+// from real samples to hard 0 the moment the buffer ran dry -- fine as a description of
+// "silence", but a hard jump from a nonzero sample to exactly 0 is itself a waveform
+// discontinuity, i.e. a click. Mid-stream this was rare (the lookahead margin upstream
+// mostly prevents the buffer ever running dry before the next chunk arrives), but the
+// *end* of a response is a guaranteed underrun -- there's no next chunk coming -- so a
+// click there was effectively unavoidable with a hard cutoff. FADE_SAMPLES below ramps
+// the last real sample down to silence instead (and symmetrically ramps back up when
+// data resumes after any underrun, mid-stream or otherwise, for the same reason in
+// reverse) -- short enough (under 2ms) to be inaudible as a fade.
+const FADE_SAMPLES = 64;
+
 class PCMPlayerProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this._buffer = new Float32Array(0);
     this._readIndex = 0;
+    this._lastSample = 0;
+    this._wasSilent = true; // fade the very first chunk in too, not just mid-stream recoveries
     this.port.onmessage = (event) => {
       if (event.data.type === "push") {
         this._append(event.data.samples);
@@ -49,12 +65,31 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
     if (!output) return true;
     const available = this._buffer.length - this._readIndex;
     const toCopy = Math.min(available, output.length);
-    for (let i = 0; i < toCopy; i++) {
-      output[i] = this._buffer[this._readIndex + i];
+
+    for (let i = 0; i < output.length; i++) {
+      if (i < toCopy) {
+        let sample = this._buffer[this._readIndex + i];
+        if (this._wasSilent) {
+          const fadeIn = Math.min(i + 1, FADE_SAMPLES) / FADE_SAMPLES;
+          sample *= fadeIn;
+          if (i + 1 >= FADE_SAMPLES) this._wasSilent = false;
+        }
+        output[i] = sample;
+        this._lastSample = sample;
+      } else {
+        // Underrun -- most commonly the guaranteed one at the very end of a response,
+        // but also any brief mid-stream gap. Fade the last real sample down instead of
+        // jumping straight to 0.
+        const samplesIntoUnderrun = i - toCopy;
+        const fadeOut = Math.max(0, 1 - (samplesIntoUnderrun + 1) / FADE_SAMPLES);
+        output[i] = this._lastSample * fadeOut;
+        if (samplesIntoUnderrun + 1 >= FADE_SAMPLES) {
+          this._lastSample = 0;
+          this._wasSilent = true;
+        }
+      }
     }
-    for (let i = toCopy; i < output.length; i++) {
-      output[i] = 0; // underrun -- silence, not a click
-    }
+
     this._readIndex += toCopy;
     return true; // keep this processor alive for the life of the AudioContext
   }
