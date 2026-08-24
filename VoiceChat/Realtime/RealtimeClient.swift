@@ -114,7 +114,7 @@ final class RealtimeClient: NSObject {
         let message = URLSessionWebSocketTask.Message.data(data)
         task.send(message) { [weak self] error in
             guard let self, let error else { return }
-            self.deliver { self.onError?("send failed: \(error.localizedDescription)") }
+            self.deliver { self.onError?("send failed: \(error.localizedDescription)\(self.handshakeDiagnostic)") }
         }
     }
 
@@ -123,13 +123,26 @@ final class RealtimeClient: NSObject {
             guard let self else { return }
             switch result {
             case .failure(let error):
-                self.deliver { self.onDisconnect?(error) }
+                let diagnostic = self.handshakeDiagnostic
+                self.deliver { self.onDisconnect?(diagnostic.isEmpty ? error : NSError(domain: (error as NSError).domain, code: (error as NSError).code, userInfo: [NSLocalizedDescriptionKey: "\(error.localizedDescription)\(diagnostic)"])) }
                 return
             case .success(let message):
                 self.deliver { self.handle(message) }
                 self.receiveLoop()
             }
         }
+    }
+
+    /// The WebSocket handshake is a plain HTTP request/response under the hood (the
+    /// `101 Switching Protocols` upgrade) — `URLSessionTask.response` exposes it once
+    /// the server has replied, even when the upgrade itself failed (e.g. a `400` with a
+    /// JSON error body instead of the expected `101`). Surfacing the real status code
+    /// here turns an opaque OS error string (e.g. "server sent an invalid or incorrect
+    /// response", -1011) into an actionable one, instead of requiring a separate
+    /// out-of-band curl repro to see what the server actually said.
+    private var handshakeDiagnostic: String {
+        guard let http = task?.response as? HTTPURLResponse else { return "" }
+        return " [handshake HTTP \(http.statusCode)]"
     }
 
     /// `URLSessionWebSocketTask`'s receive/send completions fire on URLSession's own
