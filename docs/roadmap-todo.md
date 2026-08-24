@@ -2,6 +2,11 @@
 
 这份文档记录"讨论清楚了、可以动手"的事项，来自跟用户的设计讨论。规则：一个话题只有在讨论收敛（用户确认方向）之后才进这份清单；还在来回讨论、没有定论的，留在对话里，不提前写进来。写的时候尽量注明"为什么"，不只是"做什么"，方便以后接手的人理解决策背景，不只是照着抄。
 
+## iOS 端真机/模拟器实测发现的 bug
+
+之前几批 iOS 改动全部是"源码改动，未编译验证"——这是这个开发周期里第一次收到 iOS 端真实运行时的报错反馈，值得单独记录。
+
+- [x] **Settings 里粘贴 Workspace ID 时混入反引号，导致连不上（2026-08-24 完成）**：用户真机截图报错 `invalid WebSocket URL: wss://llm-sa1qz61xz9dg5dd3\`.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime`——ID 后面多了一个反引号 `` ` ``。排查结论：**不是字符串拼接错误**，`RealtimeConfigStore.effectiveWorkspaceURL(for:)` 本身就是干净的字符串插值（`"wss://\(workspaceId)...`"），没有拼接逻辑问题。真正的原因是 `SettingsView` 里 Workspace ID 是一个自由输入的 `TextField`，粘贴进去的值本身就带着这个反引号——大概率是从某个把 ID 用 Markdown 行内代码包起来的地方（文档、聊天记录）复制过来，只带出了其中一边的反引号，而代码只 `trimmingCharacters(in: .whitespacesAndNewlines)`，不会去掉反引号这类字符，于是原样拼进了 URL。**修复**：新增 `sanitizedWorkspaceId(_:)`，在 trim 空白之后，再把反引号、直引号、弯引号（`` ` ' " ' ' " " ``）这几个"从格式化文本粘贴过来最容易带上、但绝不会是真实 Workspace ID 一部分"的字符统一清掉，`effectiveBaseURL`/`effectiveWorkspaceURL(for:)`/`effectiveCompatibleModeBaseURL` 三处都改成走这个清洗函数，不只是修报错的那一条路径。Settings 页面里预览 URL 的那行文字（`effectiveWorkspaceURL(for: workspaceId)`）现在会实时显示清洗后的结果，用户输入的原始值本身没有被静默篡改（还是原样存、原样显示在输入框里，只是所有实际拼 URL 的地方都会先清洗）。**验证方式**：这个环境没有 Swift 工具链，没法直接跑 Swift 代码——用 Python 复刻了完全相同的字符清洗逻辑，跑了 5 种场景（末尾反引号、两侧反引号、多余空白、弯引号、完全干净的 ID），全部正确复现预期结果，包括用户实际报错的那个具体值。Swift 代码本身只做了括号配对检查，没有编译验证。
 ## 记忆（本地记忆缓存）
 
 讨论于 2026-08-23，背景见 `docs/agentnexus-memory-integration-proposal.md`（智枢侧的姊妹讨论，那份是"跨频道溯源"，这里是"本地缓存怎么接多个来源"，两者互补）。
