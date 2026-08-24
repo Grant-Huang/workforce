@@ -170,16 +170,30 @@ final class RealtimeClient: NSObject {
         }
     }
 
-    /// Turns a failed-handshake `WSError` into the same actionable `"... [handshake
-    /// HTTP xxx]"` diagnostic the old `URLSessionTask.response`-based code surfaced —
-    /// Starscream reports the real rejected-upgrade status code directly on the error
-    /// instead of requiring a separate out-of-band curl repro to see what the server
-    /// actually said. Falls back to the plain error description for anything that isn't
-    /// a recognizable HTTP status (e.g. a TLS or transport-level failure).
+    /// Turns Starscream's error types into the same actionable `"... [handshake HTTP
+    /// xxx]"` diagnostic the old `URLSessionTask.response`-based code surfaced. Real-
+    /// device testing (2026-08-24) caught this file's first cut of this method
+    /// completely missing the case that actually matters: a rejected HTTP upgrade
+    /// (server responds with a non-101 status) throws `HTTPUpgradeError.notAnUpgrade`,
+    /// not `WSError` -- the `error as? WSError` cast silently failed for it, falling
+    /// through to `error.localizedDescription`, which for an untyped Swift error bridged
+    /// to NSError is a useless "operation couldn't be completed (Starscream.
+    /// HTTPUpgradeError error 0)" (0 being the case's ordinal, not the HTTP status the
+    /// error actually carries). Checked first since a rejected upgrade is exactly the
+    /// server-side-error scenario this diagnostic exists for. `WSError.message` is now
+    /// always surfaced when the cast succeeds too, for the same reason -- its `.code`
+    /// isn't always a real HTTP status (e.g. transport/security errors reuse the field
+    /// differently), and falling back to the generic description in that case hid a
+    /// perfectly good message another real-device failure turned up ("Starscream.WSError
+    /// error 1").
     private func errorDescription(_ error: Error?) -> String {
         guard let error else { return "unknown WebSocket error" }
-        if let wsError = error as? WSError, (100...599).contains(wsError.code) {
-            return "\(wsError.message) [handshake HTTP \(wsError.code)]"
+        if case let HTTPUpgradeError.notAnUpgrade(code, _) = error {
+            return "HTTP upgrade rejected [handshake HTTP \(code)]"
+        }
+        if let wsError = error as? WSError {
+            let diagnostic = (100...599).contains(wsError.code) ? " [handshake HTTP \(wsError.code)]" : ""
+            return "\(wsError.message)\(diagnostic)"
         }
         return error.localizedDescription
     }
