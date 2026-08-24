@@ -138,8 +138,16 @@ final class RealtimeClient: NSObject {
             case notUpgraded
         }
 
+        // Real-device/simulator testing (2026-08-24) found connect() hanging silently
+        // until ConversationViewModel's own 8s "连接超时，请重试" UI-level timeout fired,
+        // with no error detail -- there was no NIO-level connect timeout, so a connection
+        // attempt that can't complete (DNS, TCP handshake, TLS) just sat there instead of
+        // failing with a real error. 5s (shorter than the 8s UI timeout) so a genuine
+        // failure surfaces an actionable NIO error via onError before the generic
+        // fallback message fires.
         let bootstrap = NIOTSConnectionBootstrap(group: group)
             .tlsOptions(http1OnlyTLSOptions())
+            .connectTimeout(.seconds(5))
 
         // NOTE: unlike the ClientBootstrap-based reference example (Sources/
         // NIOWebSocketClient in apple/swift-nio), NIOTSConnectionBootstrap has no sync
