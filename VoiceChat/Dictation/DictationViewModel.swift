@@ -63,7 +63,13 @@ final class DictationViewModel: ObservableObject {
             model: RealtimeConfigStore.model,
             instructions: "",
             voice: RealtimeConfigStore.voice,
-            autoRespond: false
+            autoRespond: false,
+            // Dictation never generates a spoken reply -- this is the same
+            // text-only configuration the text session uses, which means
+            // finishForDirectSend()'s handoff into the text session needs zero
+            // modality change, only an instructions patch. Mirrors
+            // web-demo/static/app.js's startDictation().
+            modalities: ["text"]
         ) {
             // Session ready — nothing else to do, the mic tap is already forwarding
             // audio chunks; RealtimeClient.send() no-ops until the socket exists
@@ -105,12 +111,12 @@ final class DictationViewModel: ObservableObject {
     /// Used by the "send directly" button instead of `finish()`. Stops capturing audio
     /// but — unlike `finish()` — does NOT close the underlying `RealtimeClient`
     /// connection when there's text to send: that connection is the same kind of
-    /// Realtime connection `ConversationViewModel` uses (same protocol, same relay),
-    /// just configured to only transcribe (empty instructions, response.create never
-    /// called), so it's handed back to the caller to promote into a live conversation
-    /// instead of being torn down and reconnected from scratch. Mirrors
-    /// web-demo/static/app.js's promoteDictationConnection — see
-    /// docs/app-design.md section 3.4 for the measured savings on the web side (this
+    /// Realtime connection the text session uses (same protocol, same relay, same
+    /// `modalities: ["text"]` configuration), just configured with empty instructions
+    /// and response.create never called, so it's handed back to the caller to promote
+    /// into the text session instead of being torn down and reconnected from scratch.
+    /// Mirrors web-demo/static/app.js's promoteDictationConnectionToTextSession — see
+    /// docs/app-design.md section 8 for the measured savings on the web side (this
     /// iOS port of the optimization is unverified, same caveat as the rest of this file).
     ///
     /// Returns nil (and leaves nothing to reuse — any handed-off connection has already

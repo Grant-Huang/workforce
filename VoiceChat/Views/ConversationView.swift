@@ -22,6 +22,11 @@ struct ConversationView: View {
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
+                if let textSessionError = viewModel.textSessionError {
+                    Text(textSessionError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
                 // ChatGPT-style composer (docs/app-design.md section 1): text pill and
                 // the live-voice-conversation button sit side by side in one row, not
                 // a full-width pill stacked above a separate large mic button.
@@ -116,7 +121,7 @@ struct ConversationView: View {
     private var suggestionChips: some View {
         ForEach(viewModel.suggestionChips) { chip in
             Button(chip.label) {
-                viewModel.sendText(chip.query)
+                viewModel.sendTextSessionMessage(chip.query)
             }
             .font(.footnote)
             .padding(.horizontal, 14)
@@ -139,18 +144,19 @@ struct ConversationView: View {
                 .textFieldStyle(.plain)
                 .focused($textFieldFocused)
                 .onSubmit(sendTypedText)
+                .disabled(!viewModel.isIdle) // typing always goes to the text session, which can't run alongside a live voice conversation
             Button {
                 dictationViewModel.errorMessage = nil
                 dictationViewModel.start()
             } label: {
                 Image(systemName: "mic")
             }
-            .disabled(!viewModel.isIdle) // can't dictate while a live conversation is connected
+            .disabled(!viewModel.isIdle || !viewModel.isTextSessionIdle) // can't dictate while a live conversation or the text session is connected
             Button(action: sendTypedText) {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 28))
             }
-            .disabled(textDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(!viewModel.isIdle || textDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -163,7 +169,7 @@ struct ConversationView: View {
         let text = textDraft
         textDraft = ""
         textFieldFocused = false
-        viewModel.sendText(text)
+        viewModel.sendTextSessionMessage(text)
     }
 
     /// Voice-dictate-to-text (docs/app-design.md section 3), replacing textInputRow
@@ -206,12 +212,13 @@ struct ConversationView: View {
             // finishForDirectSend (unlike finish()) hands back the dictation
             // connection still open when there's text to send, so it can be reused
             // instead of closed-and-reopened — see DictationViewModel.finishForDirectSend
-            // and ConversationViewModel.sendText(_:reusing:). Deliberately not also
-            // guarding on `!cleaned.isEmpty` here: sendText(_:reusing:) already closes
-            // the handed-off connection itself when the text turns out empty, and
-            // bailing out before calling it would leak that connection instead.
+            // and ConversationViewModel.sendTextSessionMessage(_:reusingDictationClient:).
+            // Deliberately not also guarding on `!cleaned.isEmpty` here:
+            // sendTextSessionMessage(_:reusingDictationClient:) already closes the
+            // handed-off connection itself when the text turns out empty, and bailing
+            // out before calling it would leak that connection instead.
             guard let (cleaned, client) = await dictationViewModel.finishForDirectSend() else { return }
-            viewModel.sendText(cleaned, reusing: client)
+            viewModel.sendTextSessionMessage(cleaned, reusingDictationClient: client)
         } else {
             guard let cleaned = await dictationViewModel.finish(), !cleaned.isEmpty else { return }
             textDraft = cleaned
@@ -251,7 +258,7 @@ struct ConversationView: View {
                 .background(micColor)
                 .clipShape(Circle())
         }
-        .disabled(dictationViewModel.state != .idle) // can't run both mics at once
+        .disabled(dictationViewModel.state != .idle || !viewModel.isTextSessionIdle) // can't run both mics at once, or alongside the text session
     }
 
     private var micIconName: String {

@@ -20,9 +20,9 @@ enum RealtimeOutgoingEvent {
     /// echoed back `turn_detection.create_response` (and `interrupt_response`, for barge-in),
     /// so this is real, not guessed (see `web-demo/README.md`). If a different model doesn't
     /// support it, fall back to `turnDetection: nil` (manual/push-to-talk).
-    static func sessionUpdate(instructions: String, voice: String, turnDetection: String? = "server_vad", autoRespond: Bool = true) -> [String: Any] {
+    static func sessionUpdate(instructions: String, voice: String, turnDetection: String? = "server_vad", autoRespond: Bool = true, modalities: [String] = ["audio", "text"]) -> [String: Any] {
         var session: [String: Any] = [
-            "modalities": ["audio", "text"],
+            "modalities": modalities,
             "instructions": instructions,
             "voice": voice,
             "input_audio_format": "pcm16",
@@ -103,6 +103,14 @@ enum RealtimeIncomingEvent {
     /// Final spoken-response transcript. Some providers (e.g. Qwen) only send this,
     /// without incremental `.delta` events — the view model uses it as a fallback.
     case transcriptDone(text: String)
+    /// Text-session counterpart of `.transcriptDelta`/`.transcriptDone` — only sent
+    /// when the session was configured with `modalities: ["text"]` (no "audio"), which
+    /// is how the text session (typing/dictation-to-text) asks the server to skip TTS
+    /// entirely. Verified live against `qwen3.5-omni-flash-realtime` on 2026-08-23:
+    /// with text-only modalities, the server emits these instead of
+    /// `response.audio_transcript.*` and produces zero audio-related events at all.
+    case textDelta(text: String)
+    case textDone(text: String)
     case userTranscript(text: String)
     case speechStarted
     /// Ack for `session.update` — including the instructions-only patch used for
@@ -124,6 +132,10 @@ enum RealtimeIncomingEvent {
             self = .transcriptDelta(text: json["delta"] as? String ?? "")
         case "response.audio_transcript.done":
             self = .transcriptDone(text: json["transcript"] as? String ?? "")
+        case "response.text.delta":
+            self = .textDelta(text: json["delta"] as? String ?? "")
+        case "response.text.done":
+            self = .textDone(text: json["text"] as? String ?? "")
         case "conversation.item.input_audio_transcription.completed":
             self = .userTranscript(text: json["transcript"] as? String ?? "")
         case "input_audio_buffer.speech_started":

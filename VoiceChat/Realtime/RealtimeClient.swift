@@ -13,6 +13,10 @@ final class RealtimeClient: NSObject {
     var onAudioDelta: ((Data) -> Void)?
     var onTranscriptDelta: ((String) -> Void)?
     var onTranscriptDone: ((String) -> Void)?
+    /// Text-session counterparts of `onTranscriptDelta`/`onTranscriptDone` — see
+    /// `RealtimeIncomingEvent.textDelta`/`.textDone`.
+    var onTextDelta: ((String) -> Void)?
+    var onTextDone: ((String) -> Void)?
     var onUserTranscript: ((String) -> Void)?
     var onSpeechStarted: (() -> Void)?
     var onResponseDone: (() -> Void)?
@@ -45,7 +49,7 @@ final class RealtimeClient: NSObject {
     /// verified the session had actually come up, so a socket that opened but never
     /// got a working session (a real observed Qwen failure mode, see
     /// docs/qwen-realtime-voice-setup.md) looked identical to a healthy connection.
-    func connect(baseURL: String, apiKey: String, model: String, instructions: String, voice: String, turnDetection: String? = "server_vad", autoRespond: Bool = false, onSessionReady: @escaping () -> Void) {
+    func connect(baseURL: String, apiKey: String, model: String, instructions: String, voice: String, turnDetection: String? = "server_vad", autoRespond: Bool = false, modalities: [String] = ["audio", "text"], onSessionReady: @escaping () -> Void) {
         guard var components = URLComponents(string: baseURL) else {
             onError?("invalid WebSocket URL: \(baseURL)")
             return
@@ -68,7 +72,7 @@ final class RealtimeClient: NSObject {
         receiveLoop()
 
         pendingInstructionsAck = onSessionReady
-        send(RealtimeOutgoingEvent.sessionUpdate(instructions: instructions, voice: voice, turnDetection: turnDetection, autoRespond: autoRespond))
+        send(RealtimeOutgoingEvent.sessionUpdate(instructions: instructions, voice: voice, turnDetection: turnDetection, autoRespond: autoRespond, modalities: modalities))
     }
 
     /// Submits a typed or dictated-and-cleaned-up text message as a user turn.
@@ -148,6 +152,10 @@ final class RealtimeClient: NSObject {
             onTranscriptDelta?(text)
         case .transcriptDone(let text):
             onTranscriptDone?(text)
+        case .textDelta(let text):
+            onTextDelta?(text)
+        case .textDone(let text):
+            onTextDone?(text)
         case .userTranscript(let text):
             onUserTranscript?(text)
         case .speechStarted:
