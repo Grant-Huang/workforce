@@ -4,6 +4,13 @@ options:
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
+packages:
+  # Swaps RealtimeClient off URLSessionWebSocketTask -- see the doc comment on
+  # RealtimeClient for why (a real-device HTTP/2-ALPN incompatibility with
+  # Aliyun's realtime endpoint that URLSessionWebSocketTask couldn't get past).
+  Starscream:
+    url: https://github.com/daltoniam/Starscream.git
+    from: 4.0.8
 targets:
   VoiceChat:
     type: application
@@ -12,6 +19,8 @@ targets:
       - path: VoiceChat
     info:
       path: VoiceChat/Info.plist
+    dependencies:
+      - package: Starscream
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jacer.voicechat
