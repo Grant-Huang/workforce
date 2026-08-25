@@ -135,12 +135,14 @@ body {
   color: var(--muted);
 }
 
-#rawAudioDownloadLink {
+#rawAudioDownloadLink,
+#resampledAudioDownloadLink {
   font-size: 11px;
   color: var(--accent);
 }
 
-#rawAudioDownloadLink[hidden] {
+#rawAudioDownloadLink[hidden],
+#resampledAudioDownloadLink[hidden] {
   display: none;
 }
 
