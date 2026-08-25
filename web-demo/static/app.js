@@ -264,23 +264,56 @@ function encodeWav(int16Array, sampleRate) {
 
 let rawAudioChunks = []; // reset at the start of each assistant turn -- see response.audio.delta below
 let lastRawAudioURL = null;
+let lastResampledAudioURL = null;
 const rawAudioDownloadLink = document.getElementById("rawAudioDownloadLink");
+const resampledAudioDownloadLink = document.getElementById("resampledAudioDownloadLink");
 
 function finalizeRawAudioExport() {
   if (!rawAudioChunks.length) return;
-  const totalSamples = rawAudioChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const chunks = rawAudioChunks;
+  rawAudioChunks = [];
+
+  // File 1: raw, unprocessed, single 24kHz stream -- already confirmed clean (2026-08-25
+  // report), which is what motivated this diagnostic in the first place.
+  const totalSamples = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   const merged = new Int16Array(totalSamples);
   let offset = 0;
-  for (const chunk of rawAudioChunks) {
+  for (const chunk of chunks) {
     merged.set(chunk, offset);
     offset += chunk.length;
   }
-  rawAudioChunks = [];
   if (lastRawAudioURL) URL.revokeObjectURL(lastRawAudioURL); // don't leak the previous turn's blob
   lastRawAudioURL = URL.createObjectURL(encodeWav(merged, 24000)); // 24kHz -- output_audio_format: pcm16 (see sessionUpdate)
   if (rawAudioDownloadLink) {
     rawAudioDownloadLink.href = lastRawAudioURL;
     rawAudioDownloadLink.hidden = false;
+  }
+
+  // File 2: the same chunks run through resampleTo() *per chunk*, exactly as
+  // playPCM16Chunk does live -- but still bypassing the worklet/ring buffer entirely.
+  // A real bug in the fade/underrun counters (fixed 2026-08-25) didn't resolve the
+  // reported raspiness either, so this narrows the remaining suspects down to
+  // resampleTo() itself (including its per-chunk seam imprecision -- see that
+  // function's comment) vs. something else in the worklet's ring buffer/timing.
+  if (playCtx && resampledAudioDownloadLink) {
+    const resampledPieces = chunks.map((int16Chunk) => {
+      const float32 = new Float32Array(int16Chunk.length);
+      for (let i = 0; i < int16Chunk.length; i++) {
+        float32[i] = int16Chunk[i] / (int16Chunk[i] < 0 ? 0x8000 : 0x7fff);
+      }
+      return resampleTo(float32, 24000, playCtx.sampleRate);
+    });
+    const resampledTotal = resampledPieces.reduce((sum, p) => sum + p.length, 0);
+    const resampledMerged = new Float32Array(resampledTotal);
+    let rOffset = 0;
+    for (const piece of resampledPieces) {
+      resampledMerged.set(piece, rOffset);
+      rOffset += piece.length;
+    }
+    if (lastResampledAudioURL) URL.revokeObjectURL(lastResampledAudioURL);
+    lastResampledAudioURL = URL.createObjectURL(encodeWav(floatTo16BitPCM(resampledMerged), playCtx.sampleRate));
+    resampledAudioDownloadLink.href = lastResampledAudioURL;
+    resampledAudioDownloadLink.hidden = false;
   }
 }
 
