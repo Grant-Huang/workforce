@@ -698,14 +698,23 @@ async function start() {
 
     if (micStream) {
       captureCtx = new (window.AudioContext || window.webkitAudioContext)();
+      // mic-capture-worklet.js -- see its header comment for why this replaced
+      // ScriptProcessorNode: that ran its callback (downsample+PCM16+base64+WS-send) on
+      // the main thread for the whole call, which is a plausible source of the main-
+      // thread congestion that delays feeding the *separate* playback worklet's ring
+      // buffer, causing persistent raspy/沙哑 audio no fade/prebuffer tuning could fix.
+      await captureCtx.audioWorklet.addModule("/static/mic-capture-worklet.js");
       const source = captureCtx.createMediaStreamSource(micStream);
-      processorNode = captureCtx.createScriptProcessor(4096, 1, 1);
+      processorNode = new AudioWorkletNode(captureCtx, "mic-capture", {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+      });
       const silentGain = captureCtx.createGain();
       silentGain.gain.value = 0; // keep the graph "live" without echoing mic audio to speakers
 
-      processorNode.onaudioprocess = (event) => {
-        const input = event.inputBuffer.getChannelData(0);
-        const downsampled = downsampleTo16k(input, captureCtx.sampleRate);
+      processorNode.port.onmessage = (event) => {
+        const downsampled = downsampleTo16k(event.data, captureCtx.sampleRate);
         const pcm16 = floatTo16BitPCM(downsampled);
         sendEvent({ type: "input_audio_buffer.append", audio: int16ToBase64(pcm16) });
       };
