@@ -459,6 +459,40 @@ function readAnalyserLevel(analyser) {
 const BARGE_IN_CONFIRM_MS = 250;
 const BARGE_IN_CONFIRM_LEVEL = 0.12; // same 0-1 scale as readAnalyserLevel()
 
+// Real-device report (2026-08-25) clarified that "前后重叠" didn't mean overlapping
+// *audio* (the response-cancel fix already prevents that) -- it meant the assistant
+// audibly cutting its own reply off mid-sentence and starting a new one. Root cause: the
+// old flow called handleUserTurn (and therefore response.create) the instant a
+// fragment's transcript arrived. If VAD splits one utterance into two segments (a
+// mid-sentence pause outlasting silence_duration_ms), the assistant could already be
+// speaking a reply to fragment A by the time fragment B's speech_started arrives, so the
+// barge-in path cancels that in-progress reply -- audible as self-interruption, not a
+// bug in the cancel logic itself, just a consequence of responding too eagerly.
+//
+// scheduleVoiceResponse below holds each transcript for RESPONSE_DEBOUNCE_MS before
+// actually calling handleUserTurn; input_audio_buffer.speech_started arriving during
+// that window cancels the pending timer instead of letting a reply start, so a
+// near-immediate continuation gets caught (and merged -- see handleUserTurn's
+// concatenation) before the assistant ever opens its mouth. This only catches
+// continuations that resume within RESPONSE_DEBOUNCE_MS of the transcript arriving --
+// longer thinking pauses still rely on silence_duration_ms itself not splitting the
+// utterance in the first place. Not acoustically tuned (no real audio hardware in this
+// sandbox) -- needs real-device confirmation and likely adjustment.
+const RESPONSE_DEBOUNCE_MS = 500;
+let voicePendingTranscript = null; // accumulated text waiting out the debounce window
+let voiceResponseTimer = null;
+
+function scheduleVoiceResponse(transcript) {
+  voicePendingTranscript = voicePendingTranscript ? `${voicePendingTranscript} ${transcript}` : transcript;
+  if (voiceResponseTimer) clearTimeout(voiceResponseTimer);
+  voiceResponseTimer = setTimeout(() => {
+    voiceResponseTimer = null;
+    const text = voicePendingTranscript;
+    voicePendingTranscript = null;
+    handleUserTurn(text, voiceSession);
+  }, RESPONSE_DEBOUNCE_MS);
+}
+
 function confirmSustainedMicLevel(analyser, durationMs, level) {
   return new Promise((resolve) => {
     if (!analyser) { resolve(true); return; }
@@ -743,7 +777,7 @@ function handleServerEvent(json) {
     case "conversation.item.input_audio_transcription.completed":
       if (json.transcript) {
         addBubble("user", json.transcript);
-        handleUserTurn(json.transcript, voiceSession);
+        scheduleVoiceResponse(json.transcript);
       }
       break;
     case "input_audio_buffer.speech_started":
@@ -753,6 +787,18 @@ function handleServerEvent(json) {
       // that arrives after this point would just restart playback. Matches iOS's
       // onSpeechStarted (interruptPlayback + cancelResponse), which already did both.
       //
+      // If a response is still waiting out its debounce window (see
+      // scheduleVoiceResponse above), the user has already resumed talking before the
+      // assistant ever opened its mouth -- let it ride: cancel the pending response and
+      // wait for this new speech's own transcript, which scheduleVoiceResponse will
+      // concatenate onto what's already pending and restart the debounce. No barge-in
+      // needed since nothing is playing yet.
+      if (voiceResponseTimer) {
+        clearTimeout(voiceResponseTimer);
+        voiceResponseTimer = null;
+        break;
+      }
+
       // Only gated by confirmSustainedMicLevel while the assistant is actually SPEAKING
       // -- see that function's doc comment. A normal turn-start (assistant already
       // silent) has no echo to false-trigger from, so it's confirmed immediately, same
@@ -956,6 +1002,16 @@ function stop(reason) {
   // of leaving it to time out on its own, so callers awaiting it aren't stuck holding
   // a stale in-flight start()/turn.
   voiceUpdater.resolveAck();
+
+  // A response debounce (see scheduleVoiceResponse) still waiting out its window when
+  // the user hangs up would otherwise fire after ws is already null -- sendEventOn's
+  // guard keeps that harmless, but there's no reason to still run grounding/memory
+  // search for a turn nobody's listening to anymore.
+  if (voiceResponseTimer) {
+    clearTimeout(voiceResponseTimer);
+    voiceResponseTimer = null;
+  }
+  voicePendingTranscript = null;
 
   if (ws) {
     ws.close();
