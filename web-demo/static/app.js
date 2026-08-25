@@ -626,18 +626,7 @@ const textSession = { getWs: () => textWs, updater: textUpdater, pendingUserText
  * gets) and skips memory retrieval — it's a command, not a question, so the model
  * just needs to briefly confirm rather than search-and-answer.
  */
-async function handleUserTurn(text, session) {
-  // Pushing this turn to AgentNexus (with sync-status tracking + retry) is handled by
-  // ConversationHistory.add(), triggered from addBubble("user", ...) at every call site
-  // right before this function runs -- not duplicated here.
-
-  // Paired with the assistant's reply once it's done (see finalizeAssistantTurn) to run
-  // memory extraction on the complete exchange -- extraction needs both halves, not
-  // just what the user said. Set unconditionally (even for a save-intent turn, which
-  // finalizeAssistantTurn skips by re-checking SaveIntent.detect itself) so there's one
-  // place deciding that, not two.
-  session.pendingUserText = text;
-
+async function handleUserTurn(rawText, session) {
   // Real-device report (2026-08-25): with threshold/silence_duration_ms tuned low
   // (0.50 / 750ms), a single continuous utterance can get split into two VAD segments
   // -- a mid-sentence pause outlasts silence_duration_ms, the server commits+transcribes
@@ -652,6 +641,27 @@ async function handleUserTurn(text, session) {
   // previous turn's response is still in flight as a continuation, the same way a real
   // barge-in would: cancel the stale response before starting the new one, instead of
   // letting both run at once.
+  //
+  // Follow-up report (still reproducible at the safer 0.55/900 defaults): even with the
+  // cancel above, the assistant would sometimes ask about something the user had *just*
+  // said in the fragment right before it ("是七点还是八点呢？" right after the user said
+  // "八点钟开始") -- i.e. it wasn't just an audio-overlap problem, our own local
+  // grounding (memory search, the instructions patch below) was regrounding on only the
+  // *second* fragment's text, discarding whatever the first fragment said the instant
+  // `session.pendingUserText` got overwritten. Concatenating the stale fragment onto the
+  // new one before grounding gives both this app's local search and the save-intent
+  // check the whole utterance, not half of it.
+  const text = session.responsePending && session.pendingUserText
+    ? `${session.pendingUserText} ${rawText}`
+    : rawText;
+
+  // Paired with the assistant's reply once it's done (see finalizeAssistantTurn) to run
+  // memory extraction on the complete exchange -- extraction needs both halves, not
+  // just what the user said. Set unconditionally (even for a save-intent turn, which
+  // finalizeAssistantTurn skips by re-checking SaveIntent.detect itself) so there's one
+  // place deciding that, not two.
+  session.pendingUserText = text;
+
   if (session.responsePending) {
     if (session === voiceSession) {
       stopPlayback();
