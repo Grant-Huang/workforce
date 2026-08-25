@@ -1371,7 +1371,11 @@ function populateVoiceSelect(options, selected) {
 
 voiceSelect.addEventListener("change", () => {
   voice = voiceSelect.value;
-  localStorage.setItem(VOICE_STORAGE_KEY, voice);
+  try {
+    localStorage.setItem(VOICE_STORAGE_KEY, voice);
+  } catch (e) {
+    // Same storage-unavailable fallback as saveTuning() above.
+  }
 });
 
 // Barge-in/turn-taking/click tuning knobs, exposed here so testing a new value doesn't
@@ -1428,7 +1432,13 @@ function renderTuningInputs() {
 }
 
 function saveTuning() {
-  localStorage.setItem(TUNING_STORAGE_KEY, JSON.stringify(tuning));
+  try {
+    localStorage.setItem(TUNING_STORAGE_KEY, JSON.stringify(tuning));
+  } catch (e) {
+    // Storage full/unavailable (e.g. Safari private mode with "Block All Cookies") --
+    // tuning just won't persist across reloads this session, same fallback as
+    // history.js/memory.js's persist().
+  }
 }
 
 renderTuningInputs();
