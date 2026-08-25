@@ -155,6 +155,7 @@ function addBubble(role, text) {
 // (see handleUserTurn), and running extraction on top would produce a near-duplicate
 // entry paraphrasing the same content a second way.
 function finalizeAssistantTurn(session) {
+  if (session) session.responsePending = false;
   const text = assistantBubbleEl ? assistantBubbleEl.textContent : "";
   // ConversationHistory.add() also pushes to AgentNexus (with sync-status tracking +
   // retry) -- see history.js.
@@ -513,8 +514,10 @@ const textUpdater = makeSessionUpdateWaiter(() => textWs);
 // to pair a completed reply back with what the user said, for memory extraction
 // (docs/app-design.md 7.3). Lives on these session objects rather than a module-level
 // variable so voice and text turns can't cross-contaminate each other's pairing.
-const voiceSession = { getWs: () => ws, updater: voiceUpdater, pendingUserText: null };
-const textSession = { getWs: () => textWs, updater: textUpdater, pendingUserText: null };
+// responsePending: true from the moment we send response.create until response.done
+// (or a cancel) lands -- see handleUserTurn's guard below for why this exists.
+const voiceSession = { getWs: () => ws, updater: voiceUpdater, pendingUserText: null, responsePending: false };
+const textSession = { getWs: () => textWs, updater: textUpdater, pendingUserText: null, responsePending: false };
 
 /**
  * Every user turn — typed, dictated, or transcribed from live voice — comes through
@@ -543,6 +546,26 @@ async function handleUserTurn(text, session) {
   // place deciding that, not two.
   session.pendingUserText = text;
 
+  // Real-device report (2026-08-25): with threshold/silence_duration_ms tuned low
+  // (0.50 / 750ms), a single continuous utterance can get split into two VAD segments
+  // -- a mid-sentence pause outlasts silence_duration_ms, the server commits+transcribes
+  // a fragment, then the user keeps talking and eventually triggers a second commit for
+  // the rest. Each transcript reaches here and used to fire its own response.create
+  // regardless of whether the previous one had finished -- with create_response:false
+  // there's nothing server-side stopping two responses from streaming concurrently, and
+  // this app never tracked which response a response.audio.delta belonged to, so the two
+  // unrelated audio streams got interleaved into the same playback buffer. That's a
+  // plausible cause of the reported "answered twice" and the raspy/garbled audio quality
+  // both -- not just a buffer-underrun symptom. Treat a transcript that arrives while the
+  // previous turn's response is still in flight as a continuation, the same way a real
+  // barge-in would: cancel the stale response before starting the new one, instead of
+  // letting both run at once.
+  if (session.responsePending) {
+    if (session === voiceSession) stopPlayback();
+    sendEventOn(session.getWs(), { type: "response.cancel" });
+    session.responsePending = false;
+  }
+
   const saveIntent = SaveIntent.detect(text);
 
   if (saveIntent) {
@@ -560,6 +583,7 @@ async function handleUserTurn(text, session) {
     const instructions = `${BASE_INSTRUCTIONS}\n\n用户刚才明确要求记住这件事："${saveIntent.content}"，你已经帮TA记下了。只需要简短确认一句就行，不要复述内容、不要追问。`;
     await session.updater.updateInstructionsAndWait(instructions);
     sendEventOn(session.getWs(), { type: "response.create" });
+    session.responsePending = true;
     return;
   }
 
@@ -578,11 +602,13 @@ async function handleUserTurn(text, session) {
   }
 
   sendEventOn(session.getWs(), { type: "response.create" });
+  session.responsePending = true;
 }
 
 function handleBargeIn() {
   stopPlayback();
   sendEvent({ type: "response.cancel" });
+  voiceSession.responsePending = false;
   assistantBubbleEl = null;
   assistantHasDelta = false;
   setState(STATE.LISTENING);
