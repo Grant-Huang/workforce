@@ -63,6 +63,27 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
     this._readIndex = 0;
     this._lastSample = 0;
     this._wasSilent = true; // fade the very first chunk in too, not just mid-stream recoveries
+    // 2026-08-25: real-device testing found a persistent "沙沙声"/"像老电台" texture
+    // that survived every round of fadeMs/prebufferMs tuning, including fadeMs=30 --
+    // meanwhile a raw export of the server's own PCM16 bytes (bypassing this worklet
+    // entirely) played back clean, proving the noise was being introduced *in* this
+    // file. Root cause: process() below is called once per render quantum (128
+    // samples), but a fade spanning more than one quantum (any fadeMs worth more than
+    // ~2.9ms at 44.1kHz -- i.e. every fadeMs this app has ever shipped, default 15ms
+    // included) used a fade-progress counter (`i - toCopy` / bare `i`) that was local
+    // to *that single process() call* and implicitly reset every quantum, instead of
+    // persisting across calls. During any underrun/attack lasting several quanta, that
+    // produced a repeating "ramp ~19% toward the target, snap back at the next
+    // quantum's start, repeat" sawtooth instead of one smooth ramp -- amplitude
+    // modulation at roughly (sampleRate / 128) Hz, a few hundred Hz, laid on top of
+    // whatever was playing. That reads exactly as buzzy/gritty "radio static," and
+    // explains why no fadeMs value fixed it: the bug wasn't the ramp's *duration*, it
+    // was that the ramp's clock kept restarting before ever completing one pass.
+    // _fadeInElapsed/_underrunElapsed below carry the progress forward across
+    // process() calls instead, so a fade actually is one continuous ramp regardless of
+    // how many render quanta it spans.
+    this._fadeInElapsed = 0;
+    this._underrunElapsed = 0;
     // Overridable via app.js's tuning panel (see the "configure" message below) instead
     // of being fixed at module-load time -- lets a new fade duration be tested without a
     // redeploy. Falls back to this default if "configure" is never sent (or hasn't
@@ -78,6 +99,8 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
         this._buffer = new Float32Array(0);
         this._readIndex = 0;
         this._wasSilent = true; // re-arm the prebuffer gate below for whatever plays next
+        this._fadeInElapsed = 0;
+        this._underrunElapsed = 0;
       } else if (event.data.type === "configure") {
         const { fadeMs, prebufferMs } = event.data;
         if (typeof fadeMs === "number" && fadeMs > 0) {
@@ -122,20 +145,25 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
       if (i < toCopy) {
         let sample = this._buffer[this._readIndex + i];
         if (this._wasSilent) {
-          const fadeIn = Math.min(i + 1, fadeSamples) / fadeSamples;
+          this._fadeInElapsed++;
+          const fadeIn = Math.min(this._fadeInElapsed, fadeSamples) / fadeSamples;
           sample *= fadeIn;
-          if (i + 1 >= fadeSamples) this._wasSilent = false;
+          if (this._fadeInElapsed >= fadeSamples) this._wasSilent = false;
         }
         output[i] = sample;
         this._lastSample = sample;
+        this._underrunElapsed = 0; // real data flowing -- the fade-out clock resets
       } else {
         // Underrun -- most commonly the guaranteed one at the very end of a response,
         // but also any brief mid-stream gap. Fade the last real sample down instead of
-        // jumping straight to 0.
-        const samplesIntoUnderrun = i - toCopy;
-        const fadeOut = Math.max(0, 1 - (samplesIntoUnderrun + 1) / fadeSamples);
+        // jumping straight to 0. _underrunElapsed persists across process() calls (see
+        // the constructor comment) so this is one continuous ramp even when the
+        // underrun outlasts a single render quantum, not a per-quantum sawtooth.
+        this._fadeInElapsed = 0; // not currently fading in
+        this._underrunElapsed++;
+        const fadeOut = Math.max(0, 1 - this._underrunElapsed / fadeSamples);
         output[i] = this._lastSample * fadeOut;
-        if (samplesIntoUnderrun + 1 >= fadeSamples) {
+        if (this._underrunElapsed >= fadeSamples) {
           this._lastSample = 0;
           this._wasSilent = true;
         }
