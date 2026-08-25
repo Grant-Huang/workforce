@@ -135,6 +135,15 @@ body {
   color: var(--muted);
 }
 
+#rawAudioDownloadLink {
+  font-size: 11px;
+  color: var(--accent);
+}
+
+#rawAudioDownloadLink[hidden] {
+  display: none;
+}
+
 .chat {
   flex: 1;
   overflow-y: auto;
