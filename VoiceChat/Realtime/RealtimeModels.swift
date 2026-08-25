@@ -31,26 +31,33 @@ enum RealtimeOutgoingEvent {
         if let turnDetection {
             session["turn_detection"] = [
                 "type": turnDetection,
-                // Raised from the default 0.5 to 0.65 on 2026-08-24 -- real-device
-                // testing on the web port found the voice session's barge-in was very
-                // easily triggered by background noise; ported the same bump here for
-                // parity even though iOS hasn't been device-tested yet, since this is
-                // a server-side VAD threshold and the underlying sensitivity issue
-                // isn't specific to either client. Only the voice session's barge-in
-                // (client.onSpeechStarted in ConversationViewModel) is actually
-                // affected by this in practice -- the text session never sends audio,
-                // and dictation doesn't generate a reply to interrupt -- but this
-                // threshold is shared across all three calls to sessionUpdate(), and
-                // raising it has no downside for those. Not re-tuned against real
-                // speech yet (docs/roadmap-todo.md's "VAD 阈值调优" item) -- a single
-                // bump based on one web-side report, not a scientifically chosen value.
-                "threshold": 0.65,
+                // threshold history, ported from the web port for parity (see app.js's
+                // sessionUpdate call for the full story) -- not device-tested on iOS at
+                // any point in this history:
+                // 1. Raised 0.5 -> 0.65 (2026-08-24): the voice session's barge-in was
+                //    very easily triggered by background noise.
+                // 2. Lowered to 0.55 (2026-08-24, same day): a *different* report found
+                //    the assistant replying to a fragment before the user actually
+                //    finished speaking -- threshold is shared between "is this a real
+                //    interruption" and "has the user's turn ended", so tuning it up for
+                //    (1) made this worse. The web port added a client-side confirmation
+                //    gate (confirmSustainedMicLevel in app.js) as the primary defense
+                //    against (1) instead, letting threshold sit closer to default.
+                // iOS has NOT gotten the equivalent client-side gate yet (nothing in
+                // ConversationViewModel mirrors confirmSustainedMicLevel) -- ported the
+                // lowered threshold anyway for now since iOS's AVAudioSession already
+                // uses .voiceChat mode (real hardware/system AEC, likely more effective
+                // than the web port's browser-software AEC that motivated (1) in the
+                // first place -- see AudioIOManager), but this is an assumption, not
+                // something confirmed on-device. If iOS turns out to need the same
+                // false-barge-in problem (1) was fixing, it needs its own confirmation
+                // gate, not just a threshold bump back up.
+                "threshold": 0.55,
                 "prefix_padding_ms": 300,
-                // Raised from 500 to 800 on 2026-08-24, same parity reasoning as
-                // threshold above -- real-device testing on the web port found the
-                // assistant replying to a fragment before the user actually finished
-                // speaking (500ms of silence is short relative to normal mid-sentence
-                // pauses). Not device-tested on iOS yet.
+                // Raised from 500 to 800 on 2026-08-24, same parity/caveats as above --
+                // real-device testing on the web port found the assistant replying to a
+                // fragment before the user actually finished speaking (500ms of silence
+                // is short relative to normal mid-sentence pauses).
                 "silence_duration_ms": 800,
                 "create_response": autoRespond,
             ]

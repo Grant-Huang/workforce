@@ -740,30 +740,34 @@ async function start() {
         voice,
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
-        // threshold raised from the default 0.5 to 0.65 on 2026-08-24 -- real-device
-        // testing found the assistant was very easily barge-in'd by background noise
-        // (the user's own description: "随便一些其他的声音，可能它就停止说话或者中断
-        // 了"). This only touches the voice session's turn_detection -- the one wired
-        // to speech_started -> response.cancel (see handleServerEvent below) -- since
-        // that's the only session where "being interrupted" is user-visible; the text
-        // session and dictation's turn_detection govern something else (when to commit
-        // the input buffer for transcription) and weren't touched. Not re-tuned against
-        // real speech yet (docs/roadmap-todo.md's "VAD 阈值调优" item) -- this is a
-        // single bump based on one report, not a scientifically chosen value; may need
-        // another round if 0.65 turns out to be too high (real speech gets missed) or
-        // still too low (still over-triggers).
+        // threshold history (2026-08-24): raised 0.5 -> 0.65 earlier the same day after
+        // a report that the assistant was very easily barge-in'd by background noise.
+        // That same day, a *different* report came in: the assistant would start
+        // replying to a fragment ("我想问一下...") before the user actually finished
+        // speaking -- a raised threshold means more of the quieter parts of the user's
+        // own natural speech (unvoiced consonants, breaths between words) register as
+        // "silence", which combined with silence_duration_ms made genuinely-continuous
+        // speech look like it had ended. threshold is shared by both "should the
+        // assistant treat this as a real interruption" and "has the user's turn ended" --
+        // tuning it up for the first problem makes the second worse, and vice versa.
         //
-        // silence_duration_ms raised from the default 500 to 800 on 2026-08-24 -- a
-        // separate real-device report: the assistant would start replying to a fragment
-        // ("我想问一下...") before the user actually finished the sentence, read as the
-        // assistant interrupting the user. 500ms of silence is short relative to normal
-        // mid-sentence pauses (thinking, breathing) -- 800ms gives more room before the
-        // server decides the turn is over. Same "one report, not scientifically tuned"
-        // caveat as threshold above; may need further adjustment (800ms could itself
-        // start to feel laggy for people who pause less).
+        // Lowered back to 0.55 (partway back to the 0.5 default, not all the way) now
+        // that confirmSustainedMicLevel() (see handleServerEvent's speech_started case)
+        // exists as a client-side layer against false barge-in from echo -- the server
+        // threshold no longer has to carry that whole burden by itself, so it can sit
+        // closer to default and let silence_duration_ms (800, see below) do more of the
+        // "avoid premature turn-ending" work instead. Not scientifically tuned (single
+        // reports, no real audio hardware in this sandbox) -- may need further
+        // adjustment either direction.
+        //
+        // silence_duration_ms raised from the default 500 to 800 on 2026-08-24 for the
+        // same premature-turn-ending report above -- 500ms of silence is short relative
+        // to normal mid-sentence pauses (thinking, breathing); 800ms gives more room
+        // before the server decides the turn is over. May need further adjustment (800ms
+        // could itself start to feel laggy for people who pause less).
         turn_detection: {
           type: "server_vad",
-          threshold: 0.65,
+          threshold: 0.55,
           prefix_padding_ms: 300,
           silence_duration_ms: 800,
           create_response: false,
