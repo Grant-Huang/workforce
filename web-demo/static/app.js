@@ -1386,6 +1386,22 @@ voiceSelect.addEventListener("change", () => {
 const TUNING_STORAGE_KEY = "voiceChat.tuning";
 const TUNING_DEFAULTS = { threshold: 0.55, silenceMs: 900, fadeMs: 15, prebufferMs: 100 };
 
+// Explanation text for the "?" tip buttons next to each field above -- threshold/
+// silenceMs wording mirrors VoiceChat/Settings/SettingsView.swift's SettingsTip enum
+// so both platforms explain the shared server-side params the same way; fadeMs/
+// prebufferMs are web-only (no iOS equivalent -- see pcm-player-worklet.js's history
+// comments for why AVAudioPlayerNode doesn't need them).
+const TUNING_TIPS = {
+  threshold:
+    "服务端判断“用户正在说话”的灵敏度，范围 0–1。数值越低，越容易把小声音也当成“有人在说话”（更容易打断 AI，但环境噪音也更容易被误判成插话）；数值越高，需要更明显的声音才会被判定为说话（不容易被打断，但小声说话可能被漏判）。推荐范围 0.5–0.6。",
+  silenceMs:
+    "用户停止说话后，需要静音多久（毫秒）服务端才判定“这一轮说完了”。数值越小，AI 回复更快，但容易在用户换气、思考停顿时就抢话；数值越大，越不容易抢话，但每一轮的等待延迟也会变长。推荐范围 700–1000ms。",
+  fadeMs:
+    "播放缓冲区在“有声音”和“没声音”之间切换时的淡入淡出时长（毫秒），用来消除生硬跳变产生的“咔哒”声。太短起不到消音效果，太长会让声音听起来发糊。推荐范围 10–20ms。",
+  prebufferMs:
+    "开始/恢复播放前，先攒够多少毫秒的数据再出声，用来防止网络抖动导致缓冲区反复跑空（表现为“沙哑”“毛躁”的声音质感）。太小起不到防抖作用，太大会让语音播放的启动延迟变得明显。推荐范围 80–150ms。",
+};
+
 function loadTuning() {
   try {
     const saved = JSON.parse(localStorage.getItem(TUNING_STORAGE_KEY) || "{}");
@@ -1442,6 +1458,15 @@ document.getElementById("tuningReset").addEventListener("click", () => {
   tuning = { ...TUNING_DEFAULTS };
   saveTuning();
   renderTuningInputs();
+});
+
+// Delegated listener (not one per button) so this keeps working unchanged if the
+// panel's markup ever grows more fields -- see the "?" buttons in index.html.
+tuningPanel.addEventListener("click", (event) => {
+  const btn = event.target.closest(".tipBtn");
+  if (!btn) return;
+  const tip = TUNING_TIPS[btn.dataset.tip];
+  if (tip) alert(tip);
 });
 
 (async () => {

@@ -7,6 +7,33 @@ private enum ConnectionTestState {
     case failure(String)
 }
 
+/// Explanatory text for the "ⓘ" tip buttons next to each tuning parameter — mirrors
+/// web-demo/static/app.js's TUNING_TIPS wording so both platforms explain the same
+/// knobs the same way. See RealtimeModels.swift's turn_detection comment for the
+/// tuning history that produced today's recommended values.
+private enum SettingsTip: String, Identifiable {
+    case vadThreshold
+    case vadSilenceDurationMs
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .vadThreshold: return "VAD threshold"
+        case .vadSilenceDurationMs: return "silence_duration_ms"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .vadThreshold:
+            return "服务端判断“用户正在说话”的灵敏度，范围 0–1。数值越低，越容易把小声音也当成“有人在说话”（更容易打断 AI，但环境噪音也更容易被误判成插话）；数值越高，需要更明显的声音才会被判定为说话（不容易被打断，但用户小声说话可能被漏判）。推荐范围 0.5–0.6。"
+        case .vadSilenceDurationMs:
+            return "用户停止说话后，需要静音多久（毫秒）服务端才判定“这一轮说完了”。数值越小，AI 回复更快，但容易在用户换气、思考停顿时就抢话；数值越大，越不容易抢话，但每一轮的等待延迟也会变长。推荐范围 700–1000ms。"
+        }
+    }
+}
+
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var apiKey: String = APIKeyStore.load() ?? ""
@@ -14,6 +41,9 @@ struct SettingsView: View {
     @State private var model: String = RealtimeConfigStore.model
     @State private var voice: String = RealtimeConfigStore.voice
     @State private var workspaceId: String = RealtimeConfigStore.workspaceId
+    @State private var vadThreshold: Double = RealtimeConfigStore.vadThreshold
+    @State private var vadSilenceDurationMs: Int = RealtimeConfigStore.vadSilenceDurationMs
+    @State private var activeTip: SettingsTip?
 
     @State private var agentNexusBaseURL: String = AgentNexusConfigStore.baseURL
     @State private var agentNexusChannelID: String = AgentNexusConfigStore.channelID
@@ -69,6 +99,41 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    HStack {
+                        Text("VAD threshold")
+                        Spacer()
+                        TextField("0.55", value: $vadThreshold, format: .number)
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 70)
+                        Button {
+                            activeTip = .vadThreshold
+                        } label: {
+                            Image(systemName: "questionmark.circle")
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    HStack {
+                        Text("silence_duration_ms")
+                        Spacer()
+                        TextField("900", value: $vadSilenceDurationMs, format: .number)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 70)
+                        Button {
+                            activeTip = .vadSilenceDurationMs
+                        } label: {
+                            Image(systemName: "questionmark.circle")
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    Text("语音检测参数（VAD）")
+                } footer: {
+                    Text("点参数旁的 ⓘ 查看每个参数的作用和推荐值。修改后下次开始语音对话时生效。")
+                }
+
+                Section {
                     TextField("https://your-agentnexus-server", text: $agentNexusBaseURL)
                         .textContentType(.URL)
                         .autocorrectionDisabled()
@@ -118,6 +183,8 @@ struct SettingsView: View {
                         RealtimeConfigStore.model = model
                         RealtimeConfigStore.voice = voice
                         RealtimeConfigStore.workspaceId = workspaceId
+                        RealtimeConfigStore.vadThreshold = vadThreshold
+                        RealtimeConfigStore.vadSilenceDurationMs = vadSilenceDurationMs
                         AgentNexusConfigStore.baseURL = agentNexusBaseURL
                         AgentNexusConfigStore.channelID = agentNexusChannelID
                         AgentNexusTokenStore.save(agentNexusToken)
@@ -127,6 +194,9 @@ struct SettingsView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
                 }
+            }
+            .alert(item: $activeTip) { tip in
+                Alert(title: Text(tip.title), message: Text(tip.message), dismissButton: .default(Text("知道了")))
             }
         }
     }

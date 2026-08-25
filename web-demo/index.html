@@ -18,19 +18,27 @@
          会话时生效（不需要改代码重新部署）——见 app.js 的 loadTuning()/tuning 相关代码。 -->
     <div class="tuningPanel" id="tuningPanel" hidden>
       <label>
-        VAD threshold
+        <span class="tuningLabelRow">VAD threshold
+          <button type="button" class="tipBtn" data-tip="threshold" aria-label="说明">?</button>
+        </span>
         <input type="number" id="tuneThreshold" min="0" max="1" step="0.01">
       </label>
       <label>
-        静音判定 silence_duration_ms
+        <span class="tuningLabelRow">静音判定 silence_duration_ms
+          <button type="button" class="tipBtn" data-tip="silenceMs" aria-label="说明">?</button>
+        </span>
         <input type="number" id="tuneSilenceMs" min="100" max="3000" step="50">
       </label>
       <label>
-        播放淡入淡出 fadeMs
+        <span class="tuningLabelRow">播放淡入淡出 fadeMs
+          <button type="button" class="tipBtn" data-tip="fadeMs" aria-label="说明">?</button>
+        </span>
         <input type="number" id="tuneFadeMs" min="1" max="100" step="1">
       </label>
       <label>
-        播放前缓冲 prebufferMs
+        <span class="tuningLabelRow">播放前缓冲 prebufferMs
+          <button type="button" class="tipBtn" data-tip="prebufferMs" aria-label="说明">?</button>
+        </span>
         <input type="number" id="tunePrebufferMs" min="0" max="1000" step="10">
       </label>
       <div class="tuningActions">

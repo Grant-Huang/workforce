@@ -84,6 +84,26 @@ body {
   color: var(--muted);
 }
 
+.tuningLabelRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tipBtn {
+  width: 16px;
+  height: 16px;
+  line-height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--muted);
+  font-size: 10px;
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
 .tuningPanel input {
   font-size: 13px;
   color: var(--text);

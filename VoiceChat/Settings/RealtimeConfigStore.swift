@@ -21,10 +21,17 @@ enum RealtimeConfigStore {
     private static let modelKey = "realtime.model"
     private static let voiceKey = "realtime.voice"
     private static let workspaceIdKey = "realtime.workspaceId"
+    private static let vadThresholdKey = "realtime.vadThreshold"
+    private static let vadSilenceDurationMsKey = "realtime.vadSilenceDurationMs"
 
     static let defaultBaseURL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
     static let defaultModel = "qwen3.5-omni-flash-realtime"
     static let defaultVoice = "Serena"
+    /// Same tuning history/parity note as the web port's TUNING_DEFAULTS (app.js) and
+    /// RealtimeModels.swift's old hardcoded literals this replaced — see that file's
+    /// turn_detection comment for the full 0.5→0.65→0.55 / 500→800→900 story.
+    static let defaultVadThreshold = 0.55
+    static let defaultVadSilenceDurationMs = 900
 
     /// Trimmed down to the requested shortlist (2026-08-23) — was a 14-voice curated
     /// subset of the ~47 Qwen3.5-Omni-Realtime supports (full list:
@@ -62,6 +69,25 @@ enum RealtimeConfigStore {
     static var workspaceId: String {
         get { UserDefaults.standard.string(forKey: workspaceIdKey) ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: workspaceIdKey) }
+    }
+
+    /// Server VAD sensitivity (0–1, lower = more readily hears "someone's talking").
+    /// See RealtimeModels.swift's turn_detection comment for the full tuning history.
+    static var vadThreshold: Double {
+        get {
+            let stored = UserDefaults.standard.double(forKey: vadThresholdKey)
+            return stored == 0 ? defaultVadThreshold : stored
+        }
+        set { UserDefaults.standard.set(newValue, forKey: vadThresholdKey) }
+    }
+
+    /// How long the server waits in silence before treating the user's turn as over.
+    static var vadSilenceDurationMs: Int {
+        get {
+            let stored = UserDefaults.standard.integer(forKey: vadSilenceDurationMsKey)
+            return stored == 0 ? defaultVadSilenceDurationMs : stored
+        }
+        set { UserDefaults.standard.set(newValue, forKey: vadSilenceDurationMsKey) }
     }
 
     /// The URL actually used to connect: when `workspaceId` is set, it overrides

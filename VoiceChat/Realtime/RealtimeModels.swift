@@ -31,37 +31,18 @@ enum RealtimeOutgoingEvent {
         if let turnDetection {
             session["turn_detection"] = [
                 "type": turnDetection,
-                // threshold history, ported from the web port for parity (see app.js's
-                // sessionUpdate call for the full story) -- not device-tested on iOS at
-                // any point in this history:
-                // 1. Raised 0.5 -> 0.65 (2026-08-24): the voice session's barge-in was
-                //    very easily triggered by background noise.
-                // 2. Lowered to 0.55 (2026-08-24, same day): a *different* report found
-                //    the assistant replying to a fragment before the user actually
-                //    finished speaking -- threshold is shared between "is this a real
-                //    interruption" and "has the user's turn ended", so tuning it up for
-                //    (1) made this worse. The web port added a client-side confirmation
-                //    gate (confirmSustainedMicLevel in app.js) as the primary defense
-                //    against (1) instead, letting threshold sit closer to default.
-                // iOS has NOT gotten the equivalent client-side gate yet (nothing in
-                // ConversationViewModel mirrors confirmSustainedMicLevel) -- ported the
-                // lowered threshold anyway for now since iOS's AVAudioSession already
-                // uses .voiceChat mode (real hardware/system AEC, likely more effective
-                // than the web port's browser-software AEC that motivated (1) in the
-                // first place -- see AudioIOManager), but this is an assumption, not
-                // something confirmed on-device. If iOS turns out to need the same
-                // false-barge-in problem (1) was fixing, it needs its own confirmation
-                // gate, not just a threshold bump back up.
-                "threshold": 0.55,
+                // threshold/silence_duration_ms are now user-tunable from Settings
+                // (RealtimeConfigStore.vadThreshold/vadSilenceDurationMs), mirroring the
+                // web port's tuning panel (app.js's TUNING_DEFAULTS) -- see
+                // RealtimeConfigStore's defaultVadThreshold/defaultVadSilenceDurationMs
+                // for the full 0.5->0.65->0.55 / 500->800->900 tuning history that set
+                // today's defaults. iOS has NOT gotten the web's client-side
+                // confirmSustainedMicLevel confirmation gate yet -- it relies on
+                // AVAudioSession's .voiceChat mode (real hardware/system AEC) instead,
+                // unconfirmed on-device (see AudioIOManager).
+                "threshold": RealtimeConfigStore.vadThreshold,
                 "prefix_padding_ms": 300,
-                // 500 -> 800 -> 900 across 2026-08-24, same parity/caveats as above --
-                // real-device testing on the web port found the assistant replying to a
-                // fragment before the user actually finished speaking (500ms of silence
-                // is short relative to normal mid-sentence pauses). 900ms is close to a
-                // practical ceiling for this knob -- see app.js's turn_detection comment
-                // for why pushing further trades mutual-interruption-avoidance for
-                // response latency instead.
-                "silence_duration_ms": 900,
+                "silence_duration_ms": RealtimeConfigStore.vadSilenceDurationMs,
                 "create_response": autoRespond,
             ]
         } else {
