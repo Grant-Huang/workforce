@@ -698,14 +698,23 @@ async function start() {
 
     if (micStream) {
       captureCtx = new (window.AudioContext || window.webkitAudioContext)();
+      // mic-capture-worklet.js -- see its header comment for why this replaced
+      // ScriptProcessorNode: that ran its callback (downsample+PCM16+base64+WS-send) on
+      // the main thread for the whole call, which is a plausible source of the main-
+      // thread congestion that delays feeding the *separate* playback worklet's ring
+      // buffer, causing persistent raspy/沙哑 audio no fade/prebuffer tuning could fix.
+      await captureCtx.audioWorklet.addModule("/static/mic-capture-worklet.js");
       const source = captureCtx.createMediaStreamSource(micStream);
-      processorNode = captureCtx.createScriptProcessor(4096, 1, 1);
+      processorNode = new AudioWorkletNode(captureCtx, "mic-capture", {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+      });
       const silentGain = captureCtx.createGain();
       silentGain.gain.value = 0; // keep the graph "live" without echoing mic audio to speakers
 
-      processorNode.onaudioprocess = (event) => {
-        const input = event.inputBuffer.getChannelData(0);
-        const downsampled = downsampleTo16k(input, captureCtx.sampleRate);
+      processorNode.port.onmessage = (event) => {
+        const downsampled = downsampleTo16k(event.data, captureCtx.sampleRate);
         const pcm16 = floatTo16BitPCM(downsampled);
         sendEvent({ type: "input_audio_buffer.append", audio: int16ToBase64(pcm16) });
       };
@@ -1465,101 +1474,6 @@ function saveTuning() {
     // tuning just won't persist across reloads this session, same fallback as
     // history.js/memory.js's persist().
   }
-}
-
-renderTuningInputs();
-
-tuningToggle.addEventListener("click", () => {
-  tuningPanel.hidden = !tuningPanel.hidden;
-});
-
-tuneThreshold.addEventListener("change", () => {
-  const v = parseFloat(tuneThreshold.value);
-  if (!Number.isNaN(v)) { tuning.threshold = v; saveTuning(); }
-});
-tuneSilenceMs.addEventListener("change", () => {
-  const v = parseInt(tuneSilenceMs.value, 10);
-  if (!Number.isNaN(v)) { tuning.silenceMs = v; saveTuning(); }
-});
-tuneFadeMs.addEventListener("change", () => {
-  const v = parseInt(tuneFadeMs.value, 10);
-  if (!Number.isNaN(v)) { tuning.fadeMs = v; saveTuning(); }
-});
-tunePrebufferMs.addEventListener("change", () => {
-  const v = parseInt(tunePrebufferMs.value, 10);
-  if (!Number.isNaN(v)) { tuning.prebufferMs = v; saveTuning(); }
-});
-
-document.getElementById("tuningReset").addEventListener("click", () => {
-  tuning = { ...TUNING_DEFAULTS };
-  saveTuning();
-  renderTuningInputs();
-});
-
-// Delegated listener (not one per button) so this keeps working unchanged if the
-// panel's markup ever grows more fields -- see the "?" buttons in index.html.
-tuningPanel.addEventListener("click", (event) => {
-  const btn = event.target.closest(".tipBtn");
-  if (!btn) return;
-  const tip = TUNING_TIPS[btn.dataset.tip];
-  if (tip) alert(tip);
-});
-
-// Barge-in/turn-taking/click tuning knobs, exposed here so testing a new value doesn't
-// need a code change + redeploy -- these three (threshold, silence_duration_ms, the
-// playback fade) were each hand-tuned from single real-device reports on 2026-08-24 and
-// explicitly flagged as needing further adjustment; this panel is for that follow-up
-// tuning, not an end-user-facing setting. Applied on the *next* session start (read
-// fresh in start()'s session.update and setupPlayback()'s worklet "configure" message),
-// not to a session already in progress -- simpler and safer than pushing a live
-// session.update or renegotiating the worklet mid-playback, and "change setting, tap
-// start again" is a perfectly fast loop for this kind of tuning.
-const TUNING_STORAGE_KEY = "voiceChat.tuning";
-const TUNING_DEFAULTS = { threshold: 0.55, silenceMs: 900, fadeMs: 15, prebufferMs: 100 };
-
-// Explanation text for the "?" tip buttons next to each field above -- threshold/
-// silenceMs wording mirrors VoiceChat/Settings/SettingsView.swift's SettingsTip enum
-// so both platforms explain the shared server-side params the same way; fadeMs/
-// prebufferMs are web-only (no iOS equivalent -- see pcm-player-worklet.js's history
-// comments for why AVAudioPlayerNode doesn't need them).
-const TUNING_TIPS = {
-  threshold:
-    "服务端判断“用户正在说话”的灵敏度，范围 0–1。数值越低，越容易把小声音也当成“有人在说话”（更容易打断 AI，但环境噪音也更容易被误判成插话）；数值越高，需要更明显的声音才会被判定为说话（不容易被打断，但小声说话可能被漏判）。推荐范围 0.5–0.6。",
-  silenceMs:
-    "用户停止说话后，需要静音多久（毫秒）服务端才判定“这一轮说完了”。数值越小，AI 回复更快，但容易在用户换气、思考停顿时就抢话；数值越大，越不容易抢话，但每一轮的等待延迟也会变长。推荐范围 700–1000ms。",
-  fadeMs:
-    "播放缓冲区在“有声音”和“没声音”之间切换时的淡入淡出时长（毫秒），用来消除生硬跳变产生的“咔哒”声。太短起不到消音效果，太长会让声音听起来发糊。推荐范围 10–20ms。",
-  prebufferMs:
-    "开始/恢复播放前，先攒够多少毫秒的数据再出声，用来防止网络抖动导致缓冲区反复跑空（表现为“沙哑”“毛躁”的声音质感）。太小起不到防抖作用，太大会让语音播放的启动延迟变得明显。推荐范围 80–150ms。",
-};
-
-function loadTuning() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(TUNING_STORAGE_KEY) || "{}");
-    return { ...TUNING_DEFAULTS, ...saved };
-  } catch (e) {
-    return { ...TUNING_DEFAULTS };
-  }
-}
-
-let tuning = loadTuning();
-
-const tuningToggle = document.getElementById("tuningToggle");
-const tuningPanel = document.getElementById("tuningPanel");
-const tuneThreshold = document.getElementById("tuneThreshold");
-const tuneSilenceMs = document.getElementById("tuneSilenceMs");
-const tuneFadeMs = document.getElementById("tuneFadeMs");
-const tunePrebufferMs = document.getElementById("tunePrebufferMs");
-
-function renderTuningInputs() {
-  tuneThreshold.value = tuning.threshold;
-  tuneSilenceMs.value = tuning.silenceMs;
-  tuneFadeMs.value = tuning.fadeMs;
-  tunePrebufferMs.value = tuning.prebufferMs;
-}
-
-function saveTuning() {
-  localStorage.setItem(TUNING_STORAGE_KEY, JSON.stringify(tuning));
 }
 
 renderTuningInputs();
