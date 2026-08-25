@@ -155,6 +155,7 @@ function addBubble(role, text) {
 // (see handleUserTurn), and running extraction on top would produce a near-duplicate
 // entry paraphrasing the same content a second way.
 function finalizeAssistantTurn(session) {
+  if (session) session.responsePending = false;
   const text = assistantBubbleEl ? assistantBubbleEl.textContent : "";
   // ConversationHistory.add() also pushes to AgentNexus (with sync-status tracking +
   // retry) -- see history.js.
@@ -513,8 +514,10 @@ const textUpdater = makeSessionUpdateWaiter(() => textWs);
 // to pair a completed reply back with what the user said, for memory extraction
 // (docs/app-design.md 7.3). Lives on these session objects rather than a module-level
 // variable so voice and text turns can't cross-contaminate each other's pairing.
-const voiceSession = { getWs: () => ws, updater: voiceUpdater, pendingUserText: null };
-const textSession = { getWs: () => textWs, updater: textUpdater, pendingUserText: null };
+// responsePending: true from the moment we send response.create until response.done
+// (or a cancel) lands -- see handleUserTurn's guard below for why this exists.
+const voiceSession = { getWs: () => ws, updater: voiceUpdater, pendingUserText: null, responsePending: false };
+const textSession = { getWs: () => textWs, updater: textUpdater, pendingUserText: null, responsePending: false };
 
 /**
  * Every user turn — typed, dictated, or transcribed from live voice — comes through
@@ -543,6 +546,26 @@ async function handleUserTurn(text, session) {
   // place deciding that, not two.
   session.pendingUserText = text;
 
+  // Real-device report (2026-08-25): with threshold/silence_duration_ms tuned low
+  // (0.50 / 750ms), a single continuous utterance can get split into two VAD segments
+  // -- a mid-sentence pause outlasts silence_duration_ms, the server commits+transcribes
+  // a fragment, then the user keeps talking and eventually triggers a second commit for
+  // the rest. Each transcript reaches here and used to fire its own response.create
+  // regardless of whether the previous one had finished -- with create_response:false
+  // there's nothing server-side stopping two responses from streaming concurrently, and
+  // this app never tracked which response a response.audio.delta belonged to, so the two
+  // unrelated audio streams got interleaved into the same playback buffer. That's a
+  // plausible cause of the reported "answered twice" and the raspy/garbled audio quality
+  // both -- not just a buffer-underrun symptom. Treat a transcript that arrives while the
+  // previous turn's response is still in flight as a continuation, the same way a real
+  // barge-in would: cancel the stale response before starting the new one, instead of
+  // letting both run at once.
+  if (session.responsePending) {
+    if (session === voiceSession) stopPlayback();
+    sendEventOn(session.getWs(), { type: "response.cancel" });
+    session.responsePending = false;
+  }
+
   const saveIntent = SaveIntent.detect(text);
 
   if (saveIntent) {
@@ -560,6 +583,7 @@ async function handleUserTurn(text, session) {
     const instructions = `${BASE_INSTRUCTIONS}\n\n用户刚才明确要求记住这件事："${saveIntent.content}"，你已经帮TA记下了。只需要简短确认一句就行，不要复述内容、不要追问。`;
     await session.updater.updateInstructionsAndWait(instructions);
     sendEventOn(session.getWs(), { type: "response.create" });
+    session.responsePending = true;
     return;
   }
 
@@ -578,11 +602,13 @@ async function handleUserTurn(text, session) {
   }
 
   sendEventOn(session.getWs(), { type: "response.create" });
+  session.responsePending = true;
 }
 
 function handleBargeIn() {
   stopPlayback();
   sendEvent({ type: "response.cancel" });
+  voiceSession.responsePending = false;
   assistantBubbleEl = null;
   assistantHasDelta = false;
   setState(STATE.LISTENING);
@@ -1371,7 +1397,112 @@ function populateVoiceSelect(options, selected) {
 
 voiceSelect.addEventListener("change", () => {
   voice = voiceSelect.value;
-  localStorage.setItem(VOICE_STORAGE_KEY, voice);
+  try {
+    localStorage.setItem(VOICE_STORAGE_KEY, voice);
+  } catch (e) {
+    // Same storage-unavailable fallback as saveTuning() above.
+  }
+});
+
+// Barge-in/turn-taking/click tuning knobs, exposed here so testing a new value doesn't
+// need a code change + redeploy -- these three (threshold, silence_duration_ms, the
+// playback fade) were each hand-tuned from single real-device reports on 2026-08-24 and
+// explicitly flagged as needing further adjustment; this panel is for that follow-up
+// tuning, not an end-user-facing setting. Applied on the *next* session start (read
+// fresh in start()'s session.update and setupPlayback()'s worklet "configure" message),
+// not to a session already in progress -- simpler and safer than pushing a live
+// session.update or renegotiating the worklet mid-playback, and "change setting, tap
+// start again" is a perfectly fast loop for this kind of tuning.
+const TUNING_STORAGE_KEY = "voiceChat.tuning";
+const TUNING_DEFAULTS = { threshold: 0.55, silenceMs: 900, fadeMs: 15, prebufferMs: 100 };
+
+// Explanation text for the "?" tip buttons next to each field above -- threshold/
+// silenceMs wording mirrors VoiceChat/Settings/SettingsView.swift's SettingsTip enum
+// so both platforms explain the shared server-side params the same way; fadeMs/
+// prebufferMs are web-only (no iOS equivalent -- see pcm-player-worklet.js's history
+// comments for why AVAudioPlayerNode doesn't need them).
+const TUNING_TIPS = {
+  threshold:
+    "服务端判断“用户正在说话”的灵敏度，范围 0–1。数值越低，越容易把小声音也当成“有人在说话”（更容易打断 AI，但环境噪音也更容易被误判成插话）；数值越高，需要更明显的声音才会被判定为说话（不容易被打断，但小声说话可能被漏判）。推荐范围 0.5–0.6。",
+  silenceMs:
+    "用户停止说话后，需要静音多久（毫秒）服务端才判定“这一轮说完了”。数值越小，AI 回复更快，但容易在用户换气、思考停顿时就抢话；数值越大，越不容易抢话，但每一轮的等待延迟也会变长。推荐范围 700–1000ms。",
+  fadeMs:
+    "播放缓冲区在“有声音”和“没声音”之间切换时的淡入淡出时长（毫秒），用来消除生硬跳变产生的“咔哒”声。太短起不到消音效果，太长会让声音听起来发糊。推荐范围 10–20ms。",
+  prebufferMs:
+    "开始/恢复播放前，先攒够多少毫秒的数据再出声，用来防止网络抖动导致缓冲区反复跑空（表现为“沙哑”“毛躁”的声音质感）。太小起不到防抖作用，太大会让语音播放的启动延迟变得明显。推荐范围 80–150ms。",
+};
+
+function loadTuning() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(TUNING_STORAGE_KEY) || "{}");
+    return { ...TUNING_DEFAULTS, ...saved };
+  } catch (e) {
+    return { ...TUNING_DEFAULTS };
+  }
+}
+
+let tuning = loadTuning();
+
+const tuningToggle = document.getElementById("tuningToggle");
+const tuningPanel = document.getElementById("tuningPanel");
+const tuneThreshold = document.getElementById("tuneThreshold");
+const tuneSilenceMs = document.getElementById("tuneSilenceMs");
+const tuneFadeMs = document.getElementById("tuneFadeMs");
+const tunePrebufferMs = document.getElementById("tunePrebufferMs");
+
+function renderTuningInputs() {
+  tuneThreshold.value = tuning.threshold;
+  tuneSilenceMs.value = tuning.silenceMs;
+  tuneFadeMs.value = tuning.fadeMs;
+  tunePrebufferMs.value = tuning.prebufferMs;
+}
+
+function saveTuning() {
+  try {
+    localStorage.setItem(TUNING_STORAGE_KEY, JSON.stringify(tuning));
+  } catch (e) {
+    // Storage full/unavailable (e.g. Safari private mode with "Block All Cookies") --
+    // tuning just won't persist across reloads this session, same fallback as
+    // history.js/memory.js's persist().
+  }
+}
+
+renderTuningInputs();
+
+tuningToggle.addEventListener("click", () => {
+  tuningPanel.hidden = !tuningPanel.hidden;
+});
+
+tuneThreshold.addEventListener("change", () => {
+  const v = parseFloat(tuneThreshold.value);
+  if (!Number.isNaN(v)) { tuning.threshold = v; saveTuning(); }
+});
+tuneSilenceMs.addEventListener("change", () => {
+  const v = parseInt(tuneSilenceMs.value, 10);
+  if (!Number.isNaN(v)) { tuning.silenceMs = v; saveTuning(); }
+});
+tuneFadeMs.addEventListener("change", () => {
+  const v = parseInt(tuneFadeMs.value, 10);
+  if (!Number.isNaN(v)) { tuning.fadeMs = v; saveTuning(); }
+});
+tunePrebufferMs.addEventListener("change", () => {
+  const v = parseInt(tunePrebufferMs.value, 10);
+  if (!Number.isNaN(v)) { tuning.prebufferMs = v; saveTuning(); }
+});
+
+document.getElementById("tuningReset").addEventListener("click", () => {
+  tuning = { ...TUNING_DEFAULTS };
+  saveTuning();
+  renderTuningInputs();
+});
+
+// Delegated listener (not one per button) so this keeps working unchanged if the
+// panel's markup ever grows more fields -- see the "?" buttons in index.html.
+tuningPanel.addEventListener("click", (event) => {
+  const btn = event.target.closest(".tipBtn");
+  if (!btn) return;
+  const tip = TUNING_TIPS[btn.dataset.tip];
+  if (tip) alert(tip);
 });
 
 // Barge-in/turn-taking/click tuning knobs, exposed here so testing a new value doesn't
