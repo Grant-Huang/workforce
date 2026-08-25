@@ -9,9 +9,31 @@
 <body>
   <div class="app">
     <header class="topbar">
+      <button type="button" id="tuningToggle" class="tuningToggle" aria-label="调参" title="调参">⚙</button>
       <select id="voiceSelect" class="voiceSelect" aria-label="选择音色" title="选择音色"></select>
       <span class="status" id="status">未连接</span>
     </header>
+
+    <!-- 调参面板：VAD threshold / silence_duration_ms / 播放淡入淡出时长，本地留存，下次开始
+         会话时生效（不需要改代码重新部署）——见 app.js 的 loadTuning()/tuning 相关代码。 -->
+    <div class="tuningPanel" id="tuningPanel" hidden>
+      <label>
+        VAD threshold
+        <input type="number" id="tuneThreshold" min="0" max="1" step="0.01">
+      </label>
+      <label>
+        静音判定 silence_duration_ms
+        <input type="number" id="tuneSilenceMs" min="100" max="3000" step="50">
+      </label>
+      <label>
+        播放淡入淡出 fadeMs
+        <input type="number" id="tuneFadeMs" min="1" max="100" step="1">
+      </label>
+      <div class="tuningActions">
+        <button type="button" id="tuningReset">重置默认值</button>
+        <span class="tuningHint">下次点开始会话时生效</span>
+      </div>
+    </div>
 
     <main class="chat" id="chat">
       <div class="empty" id="empty">

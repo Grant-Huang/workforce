@@ -276,6 +276,10 @@ async function setupPlayback() {
     outputChannelCount: [1],
   });
 
+  // See the tuning panel setup below (tuning.fadeMs) -- falls back to the worklet's own
+  // sampleRate-based ~15ms default if this message is somehow never delivered.
+  playWorkletNode.port.postMessage({ type: "configure", fadeMs: tuning.fadeMs });
+
   playDestNode = playCtx.createMediaStreamDestination();
   playWorkletNode.connect(playDestNode);
 
@@ -765,17 +769,21 @@ async function start() {
         // normal mid-sentence pauses (thinking, breathing). 900ms is close to a practical
         // ceiling for this knob: the user's own description at 800ms was
         // "互相插话，大部分它也能接上" (mutual interruption sometimes, but mostly
-        // recovers fine) -- that
-        // reads as ordinary conversational overlap rather than a bug, and pushing this
-        // much further starts trading it for response latency instead. If mutual
-        // interruption still needs to go lower than this after 900ms, the fix is
-        // probably not another bump here -- it's inherent to turn-taking based on
-        // silence detection.
+        // recovers fine) -- that reads as ordinary conversational overlap rather than a
+        // bug, and pushing this much further starts trading it for response latency
+        // instead. If mutual interruption still needs to go lower than this after 900ms,
+        // the fix is probably not another bump here -- it's inherent to turn-taking
+        // based on silence detection.
+        //
+        // Both values now come from the tuning panel (see loadTuning() above) instead of
+        // being hardcoded, so a further round of this doesn't need a redeploy -- the
+        // numbers in the comments above are TUNING_DEFAULTS, not necessarily what's
+        // actually in effect for this session.
         turn_detection: {
           type: "server_vad",
-          threshold: 0.55,
+          threshold: tuning.threshold,
           prefix_padding_ms: 300,
-          silence_duration_ms: 900,
+          silence_duration_ms: tuning.silenceMs,
           create_response: false,
         },
       });
@@ -1364,6 +1372,70 @@ function populateVoiceSelect(options, selected) {
 voiceSelect.addEventListener("change", () => {
   voice = voiceSelect.value;
   localStorage.setItem(VOICE_STORAGE_KEY, voice);
+});
+
+// Barge-in/turn-taking/click tuning knobs, exposed here so testing a new value doesn't
+// need a code change + redeploy -- these three (threshold, silence_duration_ms, the
+// playback fade) were each hand-tuned from single real-device reports on 2026-08-24 and
+// explicitly flagged as needing further adjustment; this panel is for that follow-up
+// tuning, not an end-user-facing setting. Applied on the *next* session start (read
+// fresh in start()'s session.update and setupPlayback()'s worklet "configure" message),
+// not to a session already in progress -- simpler and safer than pushing a live
+// session.update or renegotiating the worklet mid-playback, and "change setting, tap
+// start again" is a perfectly fast loop for this kind of tuning.
+const TUNING_STORAGE_KEY = "voiceChat.tuning";
+const TUNING_DEFAULTS = { threshold: 0.55, silenceMs: 900, fadeMs: 15 };
+
+function loadTuning() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(TUNING_STORAGE_KEY) || "{}");
+    return { ...TUNING_DEFAULTS, ...saved };
+  } catch (e) {
+    return { ...TUNING_DEFAULTS };
+  }
+}
+
+let tuning = loadTuning();
+
+const tuningToggle = document.getElementById("tuningToggle");
+const tuningPanel = document.getElementById("tuningPanel");
+const tuneThreshold = document.getElementById("tuneThreshold");
+const tuneSilenceMs = document.getElementById("tuneSilenceMs");
+const tuneFadeMs = document.getElementById("tuneFadeMs");
+
+function renderTuningInputs() {
+  tuneThreshold.value = tuning.threshold;
+  tuneSilenceMs.value = tuning.silenceMs;
+  tuneFadeMs.value = tuning.fadeMs;
+}
+
+function saveTuning() {
+  localStorage.setItem(TUNING_STORAGE_KEY, JSON.stringify(tuning));
+}
+
+renderTuningInputs();
+
+tuningToggle.addEventListener("click", () => {
+  tuningPanel.hidden = !tuningPanel.hidden;
+});
+
+tuneThreshold.addEventListener("change", () => {
+  const v = parseFloat(tuneThreshold.value);
+  if (!Number.isNaN(v)) { tuning.threshold = v; saveTuning(); }
+});
+tuneSilenceMs.addEventListener("change", () => {
+  const v = parseInt(tuneSilenceMs.value, 10);
+  if (!Number.isNaN(v)) { tuning.silenceMs = v; saveTuning(); }
+});
+tuneFadeMs.addEventListener("change", () => {
+  const v = parseInt(tuneFadeMs.value, 10);
+  if (!Number.isNaN(v)) { tuning.fadeMs = v; saveTuning(); }
+});
+
+document.getElementById("tuningReset").addEventListener("click", () => {
+  tuning = { ...TUNING_DEFAULTS };
+  saveTuning();
+  renderTuningInputs();
 });
 
 (async () => {
