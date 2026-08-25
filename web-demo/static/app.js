@@ -276,9 +276,9 @@ async function setupPlayback() {
     outputChannelCount: [1],
   });
 
-  // See the tuning panel setup below (tuning.fadeMs) -- falls back to the worklet's own
-  // sampleRate-based ~15ms default if this message is somehow never delivered.
-  playWorkletNode.port.postMessage({ type: "configure", fadeMs: tuning.fadeMs });
+  // See the tuning panel setup below (tuning.fadeMs/prebufferMs) -- falls back to the
+  // worklet's own defaults if this message is somehow never delivered.
+  playWorkletNode.port.postMessage({ type: "configure", fadeMs: tuning.fadeMs, prebufferMs: tuning.prebufferMs });
 
   playDestNode = playCtx.createMediaStreamDestination();
   playWorkletNode.connect(playDestNode);
@@ -1384,7 +1384,7 @@ voiceSelect.addEventListener("change", () => {
 // session.update or renegotiating the worklet mid-playback, and "change setting, tap
 // start again" is a perfectly fast loop for this kind of tuning.
 const TUNING_STORAGE_KEY = "voiceChat.tuning";
-const TUNING_DEFAULTS = { threshold: 0.55, silenceMs: 900, fadeMs: 15 };
+const TUNING_DEFAULTS = { threshold: 0.55, silenceMs: 900, fadeMs: 15, prebufferMs: 100 };
 
 function loadTuning() {
   try {
@@ -1402,11 +1402,13 @@ const tuningPanel = document.getElementById("tuningPanel");
 const tuneThreshold = document.getElementById("tuneThreshold");
 const tuneSilenceMs = document.getElementById("tuneSilenceMs");
 const tuneFadeMs = document.getElementById("tuneFadeMs");
+const tunePrebufferMs = document.getElementById("tunePrebufferMs");
 
 function renderTuningInputs() {
   tuneThreshold.value = tuning.threshold;
   tuneSilenceMs.value = tuning.silenceMs;
   tuneFadeMs.value = tuning.fadeMs;
+  tunePrebufferMs.value = tuning.prebufferMs;
 }
 
 function saveTuning() {
@@ -1430,6 +1432,10 @@ tuneSilenceMs.addEventListener("change", () => {
 tuneFadeMs.addEventListener("change", () => {
   const v = parseInt(tuneFadeMs.value, 10);
   if (!Number.isNaN(v)) { tuning.fadeMs = v; saveTuning(); }
+});
+tunePrebufferMs.addEventListener("change", () => {
+  const v = parseInt(tunePrebufferMs.value, 10);
+  if (!Number.isNaN(v)) { tuning.prebufferMs = v; saveTuning(); }
 });
 
 document.getElementById("tuningReset").addEventListener("click", () => {
