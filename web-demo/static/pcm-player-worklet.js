@@ -41,7 +41,20 @@
 // in audio practice run 10-20ms. Computed from the worklet's actual sample rate (not a
 // hardcoded sample count) so it's ~15ms regardless of whether the context runs at
 // 44100/48000/other native rates.
-const FADE_SAMPLES = Math.round(sampleRate * 0.015);
+const DEFAULT_FADE_MS = 15;
+// 2026-08-24, round 4: "沙哑" (raspy/hoarse), not discrete clicks, reported during
+// otherwise-continuous speech. Root cause: this worklet never had a safety margin --
+// the discrete-AudioBufferSourceNode-scheduling approach this replaced buffered
+// PLAYBACK_LOOKAHEAD_SEC (80ms) before starting playback (see git history), and that
+// got dropped in the rewrite instead of carried over. Without it, playback starts
+// consuming the instant *any* data arrives, sitting right at the edge of underrun for
+// the whole session -- ordinary network jitter is enough to trigger the fade-out/silence
+// /fade-in cycle from round 2/3 repeatedly, in quick succession. One such cycle sounds
+// like a soft click; many of them close together, several times a second, sound like
+// texture/roughness in the voice instead of discrete pops -- same mechanism, different
+// perceived result at different trigger rates. DEFAULT_PREBUFFER_MS restores that
+// safety margin, just inside the worklet instead of the old scheduling code.
+const DEFAULT_PREBUFFER_MS = 100;
 
 class PCMPlayerProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -50,6 +63,12 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
     this._readIndex = 0;
     this._lastSample = 0;
     this._wasSilent = true; // fade the very first chunk in too, not just mid-stream recoveries
+    // Overridable via app.js's tuning panel (see the "configure" message below) instead
+    // of being fixed at module-load time -- lets a new fade duration be tested without a
+    // redeploy. Falls back to this default if "configure" is never sent (or hasn't
+    // arrived yet when playback starts).
+    this._fadeSamples = Math.round(sampleRate * (DEFAULT_FADE_MS / 1000));
+    this._prebufferSamples = Math.round(sampleRate * (DEFAULT_PREBUFFER_MS / 1000));
     this.port.onmessage = (event) => {
       if (event.data.type === "push") {
         this._append(event.data.samples);
@@ -58,6 +77,15 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
         // queued instead of letting it keep playing after the user starts talking.
         this._buffer = new Float32Array(0);
         this._readIndex = 0;
+        this._wasSilent = true; // re-arm the prebuffer gate below for whatever plays next
+      } else if (event.data.type === "configure") {
+        const { fadeMs, prebufferMs } = event.data;
+        if (typeof fadeMs === "number" && fadeMs > 0) {
+          this._fadeSamples = Math.max(1, Math.round(sampleRate * (fadeMs / 1000)));
+        }
+        if (typeof prebufferMs === "number" && prebufferMs >= 0) {
+          this._prebufferSamples = Math.round(sampleRate * (prebufferMs / 1000));
+        }
       }
     };
   }
@@ -77,15 +105,26 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
     const output = outputs[0][0]; // mono
     if (!output) return true;
     const available = this._buffer.length - this._readIndex;
+
+    if (this._wasSilent && available < this._prebufferSamples) {
+      // Building up a safety margin before (re)starting playback -- see
+      // DEFAULT_PREBUFFER_MS above. Only gates right after a drain-to-silence moment
+      // (_wasSilent); once real playback is underway this doesn't hold up ordinary
+      // frames waiting for a full prebuffer on every call.
+      output.fill(0);
+      return true;
+    }
+
     const toCopy = Math.min(available, output.length);
 
+    const fadeSamples = this._fadeSamples;
     for (let i = 0; i < output.length; i++) {
       if (i < toCopy) {
         let sample = this._buffer[this._readIndex + i];
         if (this._wasSilent) {
-          const fadeIn = Math.min(i + 1, FADE_SAMPLES) / FADE_SAMPLES;
+          const fadeIn = Math.min(i + 1, fadeSamples) / fadeSamples;
           sample *= fadeIn;
-          if (i + 1 >= FADE_SAMPLES) this._wasSilent = false;
+          if (i + 1 >= fadeSamples) this._wasSilent = false;
         }
         output[i] = sample;
         this._lastSample = sample;
@@ -94,9 +133,9 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
         // but also any brief mid-stream gap. Fade the last real sample down instead of
         // jumping straight to 0.
         const samplesIntoUnderrun = i - toCopy;
-        const fadeOut = Math.max(0, 1 - (samplesIntoUnderrun + 1) / FADE_SAMPLES);
+        const fadeOut = Math.max(0, 1 - (samplesIntoUnderrun + 1) / fadeSamples);
         output[i] = this._lastSample * fadeOut;
-        if (samplesIntoUnderrun + 1 >= FADE_SAMPLES) {
+        if (samplesIntoUnderrun + 1 >= fadeSamples) {
           this._lastSample = 0;
           this._wasSilent = true;
         }
