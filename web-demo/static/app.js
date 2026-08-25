@@ -760,16 +760,22 @@ async function start() {
         // reports, no real audio hardware in this sandbox) -- may need further
         // adjustment either direction.
         //
-        // silence_duration_ms raised from the default 500 to 800 on 2026-08-24 for the
-        // same premature-turn-ending report above -- 500ms of silence is short relative
-        // to normal mid-sentence pauses (thinking, breathing); 800ms gives more room
-        // before the server decides the turn is over. May need further adjustment (800ms
-        // could itself start to feel laggy for people who pause less).
+        // silence_duration_ms: 500 -> 800 -> 900 across 2026-08-24 for the same
+        // premature-turn-ending report above -- 500ms of silence is short relative to
+        // normal mid-sentence pauses (thinking, breathing). 900ms is close to a practical
+        // ceiling for this knob: the user's own description at 800ms was
+        // "互相插话，大部分它也能接上" (mutual interruption sometimes, but mostly
+        // recovers fine) -- that
+        // reads as ordinary conversational overlap rather than a bug, and pushing this
+        // much further starts trading it for response latency instead. If mutual
+        // interruption still needs to go lower than this after 900ms, the fix is
+        // probably not another bump here -- it's inherent to turn-taking based on
+        // silence detection.
         turn_detection: {
           type: "server_vad",
           threshold: 0.55,
           prefix_padding_ms: 300,
-          silence_duration_ms: 800,
+          silence_duration_ms: 900,
           create_response: false,
         },
       });

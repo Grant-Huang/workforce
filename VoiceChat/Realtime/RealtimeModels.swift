@@ -54,11 +54,14 @@ enum RealtimeOutgoingEvent {
                 // gate, not just a threshold bump back up.
                 "threshold": 0.55,
                 "prefix_padding_ms": 300,
-                // Raised from 500 to 800 on 2026-08-24, same parity/caveats as above --
+                // 500 -> 800 -> 900 across 2026-08-24, same parity/caveats as above --
                 // real-device testing on the web port found the assistant replying to a
                 // fragment before the user actually finished speaking (500ms of silence
-                // is short relative to normal mid-sentence pauses).
-                "silence_duration_ms": 800,
+                // is short relative to normal mid-sentence pauses). 900ms is close to a
+                // practical ceiling for this knob -- see app.js's turn_detection comment
+                // for why pushing further trades mutual-interruption-avoidance for
+                // response latency instead.
+                "silence_duration_ms": 900,
                 "create_response": autoRespond,
             ]
         } else {
