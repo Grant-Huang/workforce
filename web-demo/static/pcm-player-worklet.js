@@ -27,8 +27,21 @@
 // click there was effectively unavoidable with a hard cutoff. FADE_SAMPLES below ramps
 // the last real sample down to silence instead (and symmetrically ramps back up when
 // data resumes after any underrun, mid-stream or otherwise, for the same reason in
-// reverse) -- short enough (under 2ms) to be inaudible as a fade.
-const FADE_SAMPLES = 64;
+// reverse).
+//
+// 2026-08-24, round 3: clicking persisted (confirmed not a caching artifact -- still
+// present in an incognito tab) at both the end of a response AND mid-stream, matching a
+// real-device observation that the assistant sometimes speaks a reply as what sounds
+// like two segments with a brief pause between them (whether that's the model actually
+// generating in separate bursts, or just a natural inter-sentence pause outrunning
+// generation speed, the effect on this buffer is the same either way: a genuine
+// underrun, not just at the very end). The original FADE_SAMPLES (64, ~1.3ms at 48kHz)
+// was a guess flagged as unverified from the start, and 1.3ms turned out to be too
+// short to reliably read as smooth rather than a soft click -- typical anti-click fades
+// in audio practice run 10-20ms. Computed from the worklet's actual sample rate (not a
+// hardcoded sample count) so it's ~15ms regardless of whether the context runs at
+// 44100/48000/other native rates.
+const FADE_SAMPLES = Math.round(sampleRate * 0.015);
 
 class PCMPlayerProcessor extends AudioWorkletProcessor {
   constructor() {

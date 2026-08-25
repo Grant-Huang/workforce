@@ -340,6 +340,46 @@ function readAnalyserLevel(analyser) {
   return Math.min(1, avg / 90); // 90, not 255: normal speech shouldn't need to peak the scale to register
 }
 
+// Defense-in-depth against the assistant's own played-back speech leaking into the mic
+// (residual echo the browser's AEC didn't fully cancel) getting misread by the server's
+// VAD as the user interrupting -- real-device report (2026-08-24). This does NOT fix the
+// underlying acoustic issue (that needs headphones or better hardware AEC -- see
+// docs/... discussion); it's a client-side confirmation gate on top of the server's
+// speech_started signal, specifically for the one scenario where a false trigger is
+// actually possible: while the assistant is SPEAKING (there's assistant audio for the
+// mic to have picked back up). A normal turn-start, where the assistant is already
+// silent, has nothing to false-trigger from and isn't gated -- see the speech_started
+// handler below.
+//
+// Echo residual tends to be a brief spike rather than sustained energy the way genuine
+// continued speech is, so this samples mic level for BARGE_IN_CONFIRM_MS and requires
+// the *average* (not "every single sample", which would also reject real speech's
+// natural brief dips between syllables) to clear BARGE_IN_CONFIRM_LEVEL before treating
+// it as a real interruption. Trade-off: genuine barge-in now takes ~BARGE_IN_CONFIRM_MS
+// longer to register. Neither constant is acoustically tuned (no real audio hardware in
+// this sandbox, same caveat as every playback/echo fix in this file) -- needs real-device
+// confirmation and likely adjustment.
+const BARGE_IN_CONFIRM_MS = 250;
+const BARGE_IN_CONFIRM_LEVEL = 0.12; // same 0-1 scale as readAnalyserLevel()
+
+function confirmSustainedMicLevel(analyser, durationMs, level) {
+  return new Promise((resolve) => {
+    if (!analyser) { resolve(true); return; }
+    const samples = [];
+    const start = performance.now();
+    const sample = () => {
+      samples.push(readAnalyserLevel(analyser));
+      if (performance.now() - start >= durationMs) {
+        const avg = samples.reduce((a, b) => a + b, 0) / samples.length;
+        resolve(avg >= level);
+        return;
+      }
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
+}
+
 function updateVoiceOrb() {
   let level = 0;
   if (state === STATE.LISTENING) level = readAnalyserLevel(micAnalyser);
@@ -536,6 +576,14 @@ async function handleUserTurn(text, session) {
   sendEventOn(session.getWs(), { type: "response.create" });
 }
 
+function handleBargeIn() {
+  stopPlayback();
+  sendEvent({ type: "response.cancel" });
+  assistantBubbleEl = null;
+  assistantHasDelta = false;
+  setState(STATE.LISTENING);
+}
+
 function handleServerEvent(json) {
   switch (json.type) {
     case "session.created":
@@ -566,11 +614,20 @@ function handleServerEvent(json) {
       // generating/streaming after the user interrupts, and any response.audio.delta
       // that arrives after this point would just restart playback. Matches iOS's
       // onSpeechStarted (interruptPlayback + cancelResponse), which already did both.
-      stopPlayback();
-      sendEvent({ type: "response.cancel" });
-      assistantBubbleEl = null;
-      assistantHasDelta = false;
-      setState(STATE.LISTENING);
+      //
+      // Only gated by confirmSustainedMicLevel while the assistant is actually SPEAKING
+      // -- see that function's doc comment. A normal turn-start (assistant already
+      // silent) has no echo to false-trigger from, so it's confirmed immediately, same
+      // as before this change.
+      if (state === STATE.SPEAKING) {
+        confirmSustainedMicLevel(micAnalyser, BARGE_IN_CONFIRM_MS, BARGE_IN_CONFIRM_LEVEL).then((confirmed) => {
+          // Re-check state: the assistant may have already finished on its own (or the
+          // user may have hung up) during the confirmation window.
+          if (confirmed && state === STATE.SPEAKING) handleBargeIn();
+        });
+      } else {
+        handleBargeIn();
+      }
       break;
     case "response.done":
       finalizeAssistantTurn(voiceSession);
@@ -683,32 +740,42 @@ async function start() {
         voice,
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
-        // threshold raised from the default 0.5 to 0.65 on 2026-08-24 -- real-device
-        // testing found the assistant was very easily barge-in'd by background noise
-        // (the user's own description: "随便一些其他的声音，可能它就停止说话或者中断
-        // 了"). This only touches the voice session's turn_detection -- the one wired
-        // to speech_started -> response.cancel (see handleServerEvent below) -- since
-        // that's the only session where "being interrupted" is user-visible; the text
-        // session and dictation's turn_detection govern something else (when to commit
-        // the input buffer for transcription) and weren't touched. Not re-tuned against
-        // real speech yet (docs/roadmap-todo.md's "VAD 阈值调优" item) -- this is a
-        // single bump based on one report, not a scientifically chosen value; may need
-        // another round if 0.65 turns out to be too high (real speech gets missed) or
-        // still too low (still over-triggers).
+        // threshold history (2026-08-24): raised 0.5 -> 0.65 earlier the same day after
+        // a report that the assistant was very easily barge-in'd by background noise.
+        // That same day, a *different* report came in: the assistant would start
+        // replying to a fragment ("我想问一下...") before the user actually finished
+        // speaking -- a raised threshold means more of the quieter parts of the user's
+        // own natural speech (unvoiced consonants, breaths between words) register as
+        // "silence", which combined with silence_duration_ms made genuinely-continuous
+        // speech look like it had ended. threshold is shared by both "should the
+        // assistant treat this as a real interruption" and "has the user's turn ended" --
+        // tuning it up for the first problem makes the second worse, and vice versa.
         //
-        // silence_duration_ms raised from the default 500 to 800 on 2026-08-24 -- a
-        // separate real-device report: the assistant would start replying to a fragment
-        // ("我想问一下...") before the user actually finished the sentence, read as the
-        // assistant interrupting the user. 500ms of silence is short relative to normal
-        // mid-sentence pauses (thinking, breathing) -- 800ms gives more room before the
-        // server decides the turn is over. Same "one report, not scientifically tuned"
-        // caveat as threshold above; may need further adjustment (800ms could itself
-        // start to feel laggy for people who pause less).
+        // Lowered back to 0.55 (partway back to the 0.5 default, not all the way) now
+        // that confirmSustainedMicLevel() (see handleServerEvent's speech_started case)
+        // exists as a client-side layer against false barge-in from echo -- the server
+        // threshold no longer has to carry that whole burden by itself, so it can sit
+        // closer to default and let silence_duration_ms (800, see below) do more of the
+        // "avoid premature turn-ending" work instead. Not scientifically tuned (single
+        // reports, no real audio hardware in this sandbox) -- may need further
+        // adjustment either direction.
+        //
+        // silence_duration_ms: 500 -> 800 -> 900 across 2026-08-24 for the same
+        // premature-turn-ending report above -- 500ms of silence is short relative to
+        // normal mid-sentence pauses (thinking, breathing). 900ms is close to a practical
+        // ceiling for this knob: the user's own description at 800ms was
+        // "互相插话，大部分它也能接上" (mutual interruption sometimes, but mostly
+        // recovers fine) -- that
+        // reads as ordinary conversational overlap rather than a bug, and pushing this
+        // much further starts trading it for response latency instead. If mutual
+        // interruption still needs to go lower than this after 900ms, the fix is
+        // probably not another bump here -- it's inherent to turn-taking based on
+        // silence detection.
         turn_detection: {
           type: "server_vad",
-          threshold: 0.65,
+          threshold: 0.55,
           prefix_padding_ms: 300,
-          silence_duration_ms: 800,
+          silence_duration_ms: 900,
           create_response: false,
         },
       });
