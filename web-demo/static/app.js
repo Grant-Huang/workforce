@@ -225,98 +225,6 @@ function base64ToInt16(base64) {
   return new Int16Array(bytes.buffer);
 }
 
-// ---- diagnostic: export the raw, unprocessed audio for the last assistant turn ----
-//
-// Real-device reports (2026-08-25) of a persistent "沙沙声"/"像老电台收音效果不好"
-// quality survived three different client-side fixes in a row (fade/prebuffer tuning,
-// then moving mic capture off the main thread) with no improvement -- which is the
-// pattern you'd see if the raspiness isn't actually introduced by this app's playback
-// pipeline (resampling, the worklet's ring buffer, fade logic) at all, but is already
-// present in the PCM16 bytes the server sends. This exports exactly those bytes --
-// concatenated response.audio.delta payloads for one assistant turn, decoded but
-// otherwise untouched by resampleTo()/the worklet -- as a downloadable WAV file, so that
-// can be checked directly instead of guessed at. If this file itself sounds raspy, the
-// problem is upstream of this app (server/model audio, or a decode bug below); if it
-// sounds clean, the problem is specifically in the playback pipeline downstream of here.
-function encodeWav(int16Array, sampleRate) {
-  const dataSize = int16Array.length * 2;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-  const writeString = (offset, str) => {
-    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-  };
-  writeString(0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeString(8, "WAVE");
-  writeString(12, "fmt ");
-  view.setUint32(16, 16, true); // PCM fmt chunk size
-  view.setUint16(20, 1, true); // audio format = PCM
-  view.setUint16(22, 1, true); // channels = 1 (mono)
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true); // byte rate (mono, 16-bit)
-  view.setUint16(32, 2, true); // block align
-  view.setUint16(34, 16, true); // bits per sample
-  writeString(36, "data");
-  view.setUint32(40, dataSize, true);
-  for (let i = 0; i < int16Array.length; i++) view.setInt16(44 + i * 2, int16Array[i], true);
-  return new Blob([buffer], { type: "audio/wav" });
-}
-
-let rawAudioChunks = []; // reset at the start of each assistant turn -- see response.audio.delta below
-let lastRawAudioURL = null;
-let lastResampledAudioURL = null;
-const rawAudioDownloadLink = document.getElementById("rawAudioDownloadLink");
-const resampledAudioDownloadLink = document.getElementById("resampledAudioDownloadLink");
-
-function finalizeRawAudioExport() {
-  if (!rawAudioChunks.length) return;
-  const chunks = rawAudioChunks;
-  rawAudioChunks = [];
-
-  // File 1: raw, unprocessed, single 24kHz stream -- already confirmed clean (2026-08-25
-  // report), which is what motivated this diagnostic in the first place.
-  const totalSamples = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const merged = new Int16Array(totalSamples);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
-  if (lastRawAudioURL) URL.revokeObjectURL(lastRawAudioURL); // don't leak the previous turn's blob
-  lastRawAudioURL = URL.createObjectURL(encodeWav(merged, 24000)); // 24kHz -- output_audio_format: pcm16 (see sessionUpdate)
-  if (rawAudioDownloadLink) {
-    rawAudioDownloadLink.href = lastRawAudioURL;
-    rawAudioDownloadLink.hidden = false;
-  }
-
-  // File 2: the same chunks run through resampleTo() *per chunk*, exactly as
-  // playPCM16Chunk does live -- but still bypassing the worklet/ring buffer entirely.
-  // A real bug in the fade/underrun counters (fixed 2026-08-25) didn't resolve the
-  // reported raspiness either, so this narrows the remaining suspects down to
-  // resampleTo() itself (including its per-chunk seam imprecision -- see that
-  // function's comment) vs. something else in the worklet's ring buffer/timing.
-  if (playCtx && resampledAudioDownloadLink) {
-    const resampledPieces = chunks.map((int16Chunk) => {
-      const float32 = new Float32Array(int16Chunk.length);
-      for (let i = 0; i < int16Chunk.length; i++) {
-        float32[i] = int16Chunk[i] / (int16Chunk[i] < 0 ? 0x8000 : 0x7fff);
-      }
-      return resampleTo(float32, 24000, playCtx.sampleRate);
-    });
-    const resampledTotal = resampledPieces.reduce((sum, p) => sum + p.length, 0);
-    const resampledMerged = new Float32Array(resampledTotal);
-    let rOffset = 0;
-    for (const piece of resampledPieces) {
-      resampledMerged.set(piece, rOffset);
-      rOffset += piece.length;
-    }
-    if (lastResampledAudioURL) URL.revokeObjectURL(lastResampledAudioURL);
-    lastResampledAudioURL = URL.createObjectURL(encodeWav(floatTo16BitPCM(resampledMerged), playCtx.sampleRate));
-    resampledAudioDownloadLink.href = lastResampledAudioURL;
-    resampledAudioDownloadLink.hidden = false;
-  }
-}
-
 // ---- playback: stream 24kHz PCM16 chunks through a continuous AudioWorklet ----
 //
 // Playback is deliberately routed through a MediaStreamAudioDestinationNode -> a hidden
@@ -697,10 +605,7 @@ async function handleUserTurn(rawText, session) {
   session.pendingUserText = text;
 
   if (session.responsePending) {
-    if (session === voiceSession) {
-      stopPlayback();
-      finalizeRawAudioExport(); // export whatever partial audio played before the cutoff, for diagnosis
-    }
+    if (session === voiceSession) stopPlayback();
     sendEventOn(session.getWs(), { type: "response.cancel" });
     session.responsePending = false;
   }
@@ -748,7 +653,6 @@ function handleBargeIn() {
   stopPlayback();
   sendEvent({ type: "response.cancel" });
   voiceSession.responsePending = false;
-  finalizeRawAudioExport(); // export whatever partial audio played before the cutoff, for diagnosis
   assistantBubbleEl = null;
   assistantHasDelta = false;
   setState(STATE.LISTENING);
@@ -763,8 +667,6 @@ function handleServerEvent(json) {
       voiceUpdater.resolveAck();
       break;
     case "response.audio.delta":
-      if (state !== STATE.SPEAKING) rawAudioChunks = []; // first delta of a new turn
-      rawAudioChunks.push(base64ToInt16(json.delta));
       playPCM16Chunk(json.delta);
       setState(STATE.SPEAKING);
       break;
@@ -815,7 +717,6 @@ function handleServerEvent(json) {
       break;
     case "response.done":
       finalizeAssistantTurn(voiceSession);
-      finalizeRawAudioExport();
       if (state !== STATE.IDLE) setState(STATE.LISTENING);
       break;
     case "error":
