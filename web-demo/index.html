@@ -44,13 +44,6 @@
       <div class="tuningActions">
         <button type="button" id="tuningReset">重置默认值</button>
         <span class="tuningHint">下次点开始会话时生效</span>
-        <!-- 诊断用：每轮 AI 回复结束/被打断后自动更新，指向服务器发来的原始 PCM16
-             音频（没经过重采样/worklet/淡入淡出处理），用来判断沙哑声是不是播放
-             管线引入的问题 -- 见 app.js 的 finalizeRawAudioExport()。 -->
-        <a id="rawAudioDownloadLink" download="assistant-raw-audio.wav" hidden>下载上一轮原始音频（诊断用）</a>
-        <!-- 同一轮数据，逐块跑过 resampleTo() 后导出（跳过 worklet）-- 用来判断沙哑声
-             是不是重采样本身引入的，还是 worklet 环形缓冲区特有的问题。 -->
-        <a id="resampledAudioDownloadLink" download="assistant-resampled-audio.wav" hidden>下载重采样后音频（诊断用）</a>
       </div>
     </div>
 

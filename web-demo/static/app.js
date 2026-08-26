@@ -225,98 +225,6 @@ function base64ToInt16(base64) {
   return new Int16Array(bytes.buffer);
 }
 
-// ---- diagnostic: export the raw, unprocessed audio for the last assistant turn ----
-//
-// Real-device reports (2026-08-25) of a persistent "沙沙声"/"像老电台收音效果不好"
-// quality survived three different client-side fixes in a row (fade/prebuffer tuning,
-// then moving mic capture off the main thread) with no improvement -- which is the
-// pattern you'd see if the raspiness isn't actually introduced by this app's playback
-// pipeline (resampling, the worklet's ring buffer, fade logic) at all, but is already
-// present in the PCM16 bytes the server sends. This exports exactly those bytes --
-// concatenated response.audio.delta payloads for one assistant turn, decoded but
-// otherwise untouched by resampleTo()/the worklet -- as a downloadable WAV file, so that
-// can be checked directly instead of guessed at. If this file itself sounds raspy, the
-// problem is upstream of this app (server/model audio, or a decode bug below); if it
-// sounds clean, the problem is specifically in the playback pipeline downstream of here.
-function encodeWav(int16Array, sampleRate) {
-  const dataSize = int16Array.length * 2;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-  const writeString = (offset, str) => {
-    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-  };
-  writeString(0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeString(8, "WAVE");
-  writeString(12, "fmt ");
-  view.setUint32(16, 16, true); // PCM fmt chunk size
-  view.setUint16(20, 1, true); // audio format = PCM
-  view.setUint16(22, 1, true); // channels = 1 (mono)
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true); // byte rate (mono, 16-bit)
-  view.setUint16(32, 2, true); // block align
-  view.setUint16(34, 16, true); // bits per sample
-  writeString(36, "data");
-  view.setUint32(40, dataSize, true);
-  for (let i = 0; i < int16Array.length; i++) view.setInt16(44 + i * 2, int16Array[i], true);
-  return new Blob([buffer], { type: "audio/wav" });
-}
-
-let rawAudioChunks = []; // reset at the start of each assistant turn -- see response.audio.delta below
-let lastRawAudioURL = null;
-let lastResampledAudioURL = null;
-const rawAudioDownloadLink = document.getElementById("rawAudioDownloadLink");
-const resampledAudioDownloadLink = document.getElementById("resampledAudioDownloadLink");
-
-function finalizeRawAudioExport() {
-  if (!rawAudioChunks.length) return;
-  const chunks = rawAudioChunks;
-  rawAudioChunks = [];
-
-  // File 1: raw, unprocessed, single 24kHz stream -- already confirmed clean (2026-08-25
-  // report), which is what motivated this diagnostic in the first place.
-  const totalSamples = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const merged = new Int16Array(totalSamples);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
-  if (lastRawAudioURL) URL.revokeObjectURL(lastRawAudioURL); // don't leak the previous turn's blob
-  lastRawAudioURL = URL.createObjectURL(encodeWav(merged, 24000)); // 24kHz -- output_audio_format: pcm16 (see sessionUpdate)
-  if (rawAudioDownloadLink) {
-    rawAudioDownloadLink.href = lastRawAudioURL;
-    rawAudioDownloadLink.hidden = false;
-  }
-
-  // File 2: the same chunks run through resampleTo() *per chunk*, exactly as
-  // playPCM16Chunk does live -- but still bypassing the worklet/ring buffer entirely.
-  // A real bug in the fade/underrun counters (fixed 2026-08-25) didn't resolve the
-  // reported raspiness either, so this narrows the remaining suspects down to
-  // resampleTo() itself (including its per-chunk seam imprecision -- see that
-  // function's comment) vs. something else in the worklet's ring buffer/timing.
-  if (playCtx && resampledAudioDownloadLink) {
-    const resampledPieces = chunks.map((int16Chunk) => {
-      const float32 = new Float32Array(int16Chunk.length);
-      for (let i = 0; i < int16Chunk.length; i++) {
-        float32[i] = int16Chunk[i] / (int16Chunk[i] < 0 ? 0x8000 : 0x7fff);
-      }
-      return resampleTo(float32, 24000, playCtx.sampleRate);
-    });
-    const resampledTotal = resampledPieces.reduce((sum, p) => sum + p.length, 0);
-    const resampledMerged = new Float32Array(resampledTotal);
-    let rOffset = 0;
-    for (const piece of resampledPieces) {
-      resampledMerged.set(piece, rOffset);
-      rOffset += piece.length;
-    }
-    if (lastResampledAudioURL) URL.revokeObjectURL(lastResampledAudioURL);
-    lastResampledAudioURL = URL.createObjectURL(encodeWav(floatTo16BitPCM(resampledMerged), playCtx.sampleRate));
-    resampledAudioDownloadLink.href = lastResampledAudioURL;
-    resampledAudioDownloadLink.hidden = false;
-  }
-}
-
 // ---- playback: stream 24kHz PCM16 chunks through a continuous AudioWorklet ----
 //
 // Playback is deliberately routed through a MediaStreamAudioDestinationNode -> a hidden
@@ -458,6 +366,40 @@ function readAnalyserLevel(analyser) {
 // confirmation and likely adjustment.
 const BARGE_IN_CONFIRM_MS = 250;
 const BARGE_IN_CONFIRM_LEVEL = 0.12; // same 0-1 scale as readAnalyserLevel()
+
+// Real-device report (2026-08-25) clarified that "前后重叠" didn't mean overlapping
+// *audio* (the response-cancel fix already prevents that) -- it meant the assistant
+// audibly cutting its own reply off mid-sentence and starting a new one. Root cause: the
+// old flow called handleUserTurn (and therefore response.create) the instant a
+// fragment's transcript arrived. If VAD splits one utterance into two segments (a
+// mid-sentence pause outlasting silence_duration_ms), the assistant could already be
+// speaking a reply to fragment A by the time fragment B's speech_started arrives, so the
+// barge-in path cancels that in-progress reply -- audible as self-interruption, not a
+// bug in the cancel logic itself, just a consequence of responding too eagerly.
+//
+// scheduleVoiceResponse below holds each transcript for RESPONSE_DEBOUNCE_MS before
+// actually calling handleUserTurn; input_audio_buffer.speech_started arriving during
+// that window cancels the pending timer instead of letting a reply start, so a
+// near-immediate continuation gets caught (and merged -- see handleUserTurn's
+// concatenation) before the assistant ever opens its mouth. This only catches
+// continuations that resume within RESPONSE_DEBOUNCE_MS of the transcript arriving --
+// longer thinking pauses still rely on silence_duration_ms itself not splitting the
+// utterance in the first place. Not acoustically tuned (no real audio hardware in this
+// sandbox) -- needs real-device confirmation and likely adjustment.
+const RESPONSE_DEBOUNCE_MS = 500;
+let voicePendingTranscript = null; // accumulated text waiting out the debounce window
+let voiceResponseTimer = null;
+
+function scheduleVoiceResponse(transcript) {
+  voicePendingTranscript = voicePendingTranscript ? `${voicePendingTranscript} ${transcript}` : transcript;
+  if (voiceResponseTimer) clearTimeout(voiceResponseTimer);
+  voiceResponseTimer = setTimeout(() => {
+    voiceResponseTimer = null;
+    const text = voicePendingTranscript;
+    voicePendingTranscript = null;
+    handleUserTurn(text, voiceSession);
+  }, RESPONSE_DEBOUNCE_MS);
+}
 
 function confirmSustainedMicLevel(analyser, durationMs, level) {
   return new Promise((resolve) => {
@@ -626,18 +568,7 @@ const textSession = { getWs: () => textWs, updater: textUpdater, pendingUserText
  * gets) and skips memory retrieval — it's a command, not a question, so the model
  * just needs to briefly confirm rather than search-and-answer.
  */
-async function handleUserTurn(text, session) {
-  // Pushing this turn to AgentNexus (with sync-status tracking + retry) is handled by
-  // ConversationHistory.add(), triggered from addBubble("user", ...) at every call site
-  // right before this function runs -- not duplicated here.
-
-  // Paired with the assistant's reply once it's done (see finalizeAssistantTurn) to run
-  // memory extraction on the complete exchange -- extraction needs both halves, not
-  // just what the user said. Set unconditionally (even for a save-intent turn, which
-  // finalizeAssistantTurn skips by re-checking SaveIntent.detect itself) so there's one
-  // place deciding that, not two.
-  session.pendingUserText = text;
-
+async function handleUserTurn(rawText, session) {
   // Real-device report (2026-08-25): with threshold/silence_duration_ms tuned low
   // (0.50 / 750ms), a single continuous utterance can get split into two VAD segments
   // -- a mid-sentence pause outlasts silence_duration_ms, the server commits+transcribes
@@ -652,11 +583,29 @@ async function handleUserTurn(text, session) {
   // previous turn's response is still in flight as a continuation, the same way a real
   // barge-in would: cancel the stale response before starting the new one, instead of
   // letting both run at once.
+  //
+  // Follow-up report (still reproducible at the safer 0.55/900 defaults): even with the
+  // cancel above, the assistant would sometimes ask about something the user had *just*
+  // said in the fragment right before it ("是七点还是八点呢？" right after the user said
+  // "八点钟开始") -- i.e. it wasn't just an audio-overlap problem, our own local
+  // grounding (memory search, the instructions patch below) was regrounding on only the
+  // *second* fragment's text, discarding whatever the first fragment said the instant
+  // `session.pendingUserText` got overwritten. Concatenating the stale fragment onto the
+  // new one before grounding gives both this app's local search and the save-intent
+  // check the whole utterance, not half of it.
+  const text = session.responsePending && session.pendingUserText
+    ? `${session.pendingUserText} ${rawText}`
+    : rawText;
+
+  // Paired with the assistant's reply once it's done (see finalizeAssistantTurn) to run
+  // memory extraction on the complete exchange -- extraction needs both halves, not
+  // just what the user said. Set unconditionally (even for a save-intent turn, which
+  // finalizeAssistantTurn skips by re-checking SaveIntent.detect itself) so there's one
+  // place deciding that, not two.
+  session.pendingUserText = text;
+
   if (session.responsePending) {
-    if (session === voiceSession) {
-      stopPlayback();
-      finalizeRawAudioExport(); // export whatever partial audio played before the cutoff, for diagnosis
-    }
+    if (session === voiceSession) stopPlayback();
     sendEventOn(session.getWs(), { type: "response.cancel" });
     session.responsePending = false;
   }
@@ -704,7 +653,6 @@ function handleBargeIn() {
   stopPlayback();
   sendEvent({ type: "response.cancel" });
   voiceSession.responsePending = false;
-  finalizeRawAudioExport(); // export whatever partial audio played before the cutoff, for diagnosis
   assistantBubbleEl = null;
   assistantHasDelta = false;
   setState(STATE.LISTENING);
@@ -719,8 +667,6 @@ function handleServerEvent(json) {
       voiceUpdater.resolveAck();
       break;
     case "response.audio.delta":
-      if (state !== STATE.SPEAKING) rawAudioChunks = []; // first delta of a new turn
-      rawAudioChunks.push(base64ToInt16(json.delta));
       playPCM16Chunk(json.delta);
       setState(STATE.SPEAKING);
       break;
@@ -733,7 +679,7 @@ function handleServerEvent(json) {
     case "conversation.item.input_audio_transcription.completed":
       if (json.transcript) {
         addBubble("user", json.transcript);
-        handleUserTurn(json.transcript, voiceSession);
+        scheduleVoiceResponse(json.transcript);
       }
       break;
     case "input_audio_buffer.speech_started":
@@ -743,6 +689,18 @@ function handleServerEvent(json) {
       // that arrives after this point would just restart playback. Matches iOS's
       // onSpeechStarted (interruptPlayback + cancelResponse), which already did both.
       //
+      // If a response is still waiting out its debounce window (see
+      // scheduleVoiceResponse above), the user has already resumed talking before the
+      // assistant ever opened its mouth -- let it ride: cancel the pending response and
+      // wait for this new speech's own transcript, which scheduleVoiceResponse will
+      // concatenate onto what's already pending and restart the debounce. No barge-in
+      // needed since nothing is playing yet.
+      if (voiceResponseTimer) {
+        clearTimeout(voiceResponseTimer);
+        voiceResponseTimer = null;
+        break;
+      }
+
       // Only gated by confirmSustainedMicLevel while the assistant is actually SPEAKING
       // -- see that function's doc comment. A normal turn-start (assistant already
       // silent) has no echo to false-trigger from, so it's confirmed immediately, same
@@ -759,7 +717,6 @@ function handleServerEvent(json) {
       break;
     case "response.done":
       finalizeAssistantTurn(voiceSession);
-      finalizeRawAudioExport();
       if (state !== STATE.IDLE) setState(STATE.LISTENING);
       break;
     case "error":
@@ -946,6 +903,16 @@ function stop(reason) {
   // of leaving it to time out on its own, so callers awaiting it aren't stuck holding
   // a stale in-flight start()/turn.
   voiceUpdater.resolveAck();
+
+  // A response debounce (see scheduleVoiceResponse) still waiting out its window when
+  // the user hangs up would otherwise fire after ws is already null -- sendEventOn's
+  // guard keeps that harmless, but there's no reason to still run grounding/memory
+  // search for a turn nobody's listening to anymore.
+  if (voiceResponseTimer) {
+    clearTimeout(voiceResponseTimer);
+    voiceResponseTimer = null;
+  }
+  voicePendingTranscript = null;
 
   if (ws) {
     ws.close();
