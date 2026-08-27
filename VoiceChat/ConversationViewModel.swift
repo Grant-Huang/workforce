@@ -91,9 +91,63 @@ final class ConversationViewModel: ObservableObject {
     /// respective onResponseDone handler to pair a completed reply back with what the
     /// user said, for memory extraction (docs/app-design.md 7.3). Two separate
     /// properties (not one shared value) so a voice turn and a text turn can never
-    /// cross-contaminate each other's pairing.
+    /// cross-contaminate each other's pairing. Also doubles as the "previous fragment"
+    /// text groundAndRespond concatenates onto a new one when a response is still
+    /// pending — see that function.
     private var pendingVoiceUserText: String?
     private var pendingTextSessionUserText: String?
+    /// True from the moment groundAndRespond calls requestResponse() until
+    /// onResponseDone/a barge-in/a stale-response cancel clears it — mirrors
+    /// web-demo/static/app.js's `session.responsePending`. Two separate flags for the
+    /// same reason as the pendingXUserText pair above.
+    private var voiceResponsePending = false
+    private var textResponsePending = false
+
+    // ---- voice-turn response debounce + echo-confirmation gate (ported from
+    // web-demo/static/app.js, 2026-08-27) ----
+    //
+    // Real-device report on the web port: even after a fix that cancels a stale
+    // in-flight response instead of letting two overlap, the assistant would still
+    // audibly interrupt *itself* mid-sentence and restart — because it had already
+    // started speaking a reply to the first VAD-detected fragment of a still-continuing
+    // utterance by the time the second fragment's speech_started arrived. Responding to
+    // every fragment the instant its transcript arrives is what made that possible in
+    // the first place. scheduleVoiceResponse below holds each transcript for
+    // responseDebounceMs before actually calling groundAndRespond; a speech_started
+    // arriving during that window cancels the pending call instead of letting a reply
+    // start, so a near-immediate continuation gets caught (and merged — see
+    // groundAndRespond) before the assistant ever opens its mouth. Only catches
+    // continuations that resume within the debounce window — a longer thinking pause
+    // still relies on the server's silence_duration_ms not splitting the utterance in
+    // the first place.
+    //
+    // Separately: a real-device report described the assistant repeatedly
+    // self-interrupting for several rounds *while the user stayed completely silent* —
+    // its own voice being picked up by the mic and misread as the user talking. The web
+    // port's matching defense (confirmSustainedMicLevel) requires the mic level to stay
+    // above a threshold for a stretch of time before treating a speech_started as a real
+    // interruption, on the theory that echo residual is a brief spike rather than
+    // genuinely sustained energy the way continued human speech is. iOS relies on
+    // AVAudioSession's .voiceChat mode for hardware-level echo cancellation (see
+    // AudioIOManager), which is expected to be more effective than the web port's
+    // software AEC, but had no equivalent client-side gate at all until now — ported for
+    // parity rather than assuming the hardware AEC alone is sufficient.
+    //
+    // Neither responseDebounceMs nor bargeInConfirmMs/Level is acoustically tuned (no
+    // real audio hardware in this sandbox) — bargeInConfirmLevel in particular is a
+    // guess on a different scale than the web port's (AudioIOManager.onInputLevel is RMS
+    // amplitude, roughly 0...0.3 for normal speech, not web's 0-1 normalized frequency
+    // average) — needs real-device confirmation and likely adjustment.
+    private static let responseDebounceMs: UInt64 = 500
+    private static let bargeInConfirmMs: UInt64 = 250
+    private static let bargeInConfirmLevel: Float = 0.03
+    private var voiceResponseTask: Task<Void, Never>?
+    private var pendingVoiceTranscript: String?
+    /// Non-nil while a confirmSustainedMicLevel window is open; onInputLevel appends to
+    /// it regardless of `state` (unlike orbLevel, which only reflects the mic while
+    /// `.listening`) so a genuine sample stream is available even while
+    /// `.assistantSpeaking`.
+    private var pendingMicLevelSamples: [Float]?
 
     init() {
         conversationHistory = ConversationHistoryStore(agentNexusClient: agentNexusClient)
@@ -241,6 +295,16 @@ final class ConversationViewModel: ObservableObject {
     }
 
     func stop(reason: String? = nil) {
+        // A response debounce (see scheduleVoiceResponse) still waiting out its window
+        // when the user hangs up would otherwise fire into a now-disconnected client --
+        // RealtimeClient.send silently no-ops without a live `outbound`, so this is
+        // harmless, but there's no reason to still run grounding/memory search for a
+        // turn nobody's listening to anymore.
+        voiceResponseTask?.cancel()
+        voiceResponseTask = nil
+        pendingVoiceTranscript = nil
+        pendingMicLevelSamples = nil
+        voiceResponsePending = false
         client.disconnect()
         audio.stop()
         setState(reason.map { .error($0) } ?? .idle)
@@ -288,7 +352,10 @@ final class ConversationViewModel: ObservableObject {
         // playback level right after a barge-in) never briefly drives the orb.
         audio.onInputLevel = { [weak self] level in
             Task { @MainActor [weak self] in
-                guard let self, case .listening = self.state else { return }
+                guard let self else { return }
+                // Fed regardless of `state` -- see pendingMicLevelSamples' doc comment.
+                self.pendingMicLevelSamples?.append(level)
+                guard case .listening = self.state else { return }
                 self.orbLevel = Double(level)
             }
         }
@@ -318,26 +385,44 @@ final class ConversationViewModel: ObservableObject {
         client.onUserTranscript = { [weak self] text in
             guard let self, !text.isEmpty else { return }
             self.appendUserTurn(text)
-            // Paired with the assistant's reply once it's done (see
-            // finalizeAssistantTurn(pairedUserText:)) to run memory extraction on the
-            // complete exchange.
-            self.pendingVoiceUserText = text
-            self.groundAndRespond(to: text, session: self.client)
+            self.scheduleVoiceResponse(text)
         }
 
         client.onSpeechStarted = { [weak self] in
-            // User barged in — stop the assistant immediately. Not calling
-            // finalizeAssistantTurn() here is deliberate: this is an interrupted,
-            // incomplete reply, not a finished turn, so it's discarded rather than
-            // persisted half-formed (matches web-demo's app.js).
-            self?.audio.interruptPlayback()
-            self?.client.cancelResponse()
-            self?.assistantLineIndex = nil
-            self?.setState(.listening)
+            guard let self else { return }
+            // A response is still waiting out its debounce window (see
+            // scheduleVoiceResponse) -- the user has already resumed talking before the
+            // assistant ever opened its mouth. Let it ride: cancel the pending response
+            // and wait for this new speech's own transcript, which scheduleVoiceResponse
+            // will concatenate onto what's already pending and restart the debounce. No
+            // barge-in needed since nothing is playing yet.
+            if self.voiceResponseTask != nil {
+                self.voiceResponseTask?.cancel()
+                self.voiceResponseTask = nil
+                return
+            }
+
+            // Only gated by confirmSustainedMicLevel while the assistant is actually
+            // speaking -- see that function's doc comment. A normal turn-start
+            // (assistant already silent) has no echo to false-trigger from, so it's
+            // confirmed immediately, same as before this change.
+            if case .assistantSpeaking = self.state {
+                Task { [weak self] in
+                    guard let self else { return }
+                    let confirmed = await self.confirmSustainedMicLevel(durationMs: Self.bargeInConfirmMs, level: Self.bargeInConfirmLevel)
+                    // Re-check state: the assistant may have already finished on its own
+                    // (or the user may have hung up) during the confirmation window.
+                    guard confirmed, case .assistantSpeaking = self.state else { return }
+                    self.handleVoiceBargeIn()
+                }
+            } else {
+                self.handleVoiceBargeIn()
+            }
         }
 
         client.onResponseDone = { [weak self] in
             guard let self else { return }
+            self.voiceResponsePending = false
             self.finalizeAssistantTurn(pairedUserText: self.pendingVoiceUserText)
             self.pendingVoiceUserText = nil
             self.setState(.listening)
@@ -380,11 +465,41 @@ final class ConversationViewModel: ObservableObject {
     /// Parameterized by `session` (the voice session's `client`, or the text session's
     /// `textClient`) so this grounding logic — the actually delicate part — isn't
     /// duplicated between the two, mirroring web-demo/static/app.js's
-    /// `handleUserTurn(text, session)`.
-    private func groundAndRespond(to userText: String, session: RealtimeClient) {
+    /// `handleUserTurn(text, session)`. `isVoice` picks which of the voiceXXX/textXXX
+    /// pending-state pairs above belongs to this call — `RealtimeClient` itself stays
+    /// networking-only (see its doc comment), so this app-level bookkeeping lives here
+    /// rather than on the session object the way the web port's does.
+    ///
+    /// Real-device report (ported from web-demo/static/app.js, 2026-08-27): a single
+    /// continuous utterance can get split into two VAD segments (a mid-sentence pause
+    /// outlasting the server's silence_duration_ms) — the server commits+transcribes a
+    /// fragment, then the user keeps talking and eventually triggers a second commit for
+    /// the rest. Without the guard below, each transcript reaching here fired its own
+    /// requestResponse() regardless of whether the previous one had finished — with
+    /// `autoRespond: false` there's nothing server-side stopping two responses from
+    /// streaming concurrently, and this app never tracked which response an
+    /// onAudioDelta belonged to, so the two unrelated audio streams could overlap in
+    /// playback. Separately, re-grounding (memory search, the instructions patch below)
+    /// on only the *new* fragment's text silently dropped whatever the previous fragment
+    /// said. Treat a transcript that arrives while the previous turn's response is still
+    /// in flight as a continuation, the same way a real barge-in would: cancel the stale
+    /// response and concatenate its text onto the new one before grounding, instead of
+    /// letting both run at once or losing half the utterance.
+    private func groundAndRespond(to rawText: String, session: RealtimeClient, isVoice: Bool) {
         // Pushing this turn to AgentNexus (with sync-status tracking + retry) is
         // handled by conversationHistory.add(), triggered from appendUserTurn() right
         // before this function runs at every call site -- not duplicated here.
+
+        var userText = rawText
+        let responsePending = isVoice ? voiceResponsePending : textResponsePending
+        if responsePending {
+            let previous = isVoice ? pendingVoiceUserText : pendingTextSessionUserText
+            if let previous { userText = "\(previous) \(rawText)" }
+            if isVoice { audio.interruptPlayback() }
+            session.cancelResponse()
+            if isVoice { voiceResponsePending = false } else { textResponsePending = false }
+        }
+        if isVoice { pendingVoiceUserText = userText } else { pendingTextSessionUserText = userText }
 
         if let saveIntent = SaveIntent.detect(userText) {
             // source defaults to "local" here (not "agentnexus") -- honestly reflects
@@ -402,8 +517,9 @@ final class ConversationViewModel: ObservableObject {
             }
             let instructions = systemInstructions
                 + "\n\n用户刚才明确要求记住这件事：\"\(saveIntent.content)\"，你已经帮TA记下了。只需要简短确认一句就行，不要复述内容、不要追问。"
-            session.updateInstructions(instructions) {
+            session.updateInstructions(instructions) { [weak self] in
                 session.requestResponse()
+                if isVoice { self?.voiceResponsePending = true } else { self?.textResponsePending = true }
             }
             return
         }
@@ -423,9 +539,60 @@ final class ConversationViewModel: ObservableObject {
             instructions += "\n\n以下是用户过去说过、可能相关的内容，如果有帮助请参考：\n" + lines.joined(separator: "\n")
         }
 
-        session.updateInstructions(instructions) {
+        session.updateInstructions(instructions) { [weak self] in
             session.requestResponse()
+            if isVoice { self?.voiceResponsePending = true } else { self?.textResponsePending = true }
         }
+    }
+
+    /// Holds a voice transcript for `responseDebounceMs` before actually grounding and
+    /// responding to it — see the doc comment on the debounce constants above. Merges
+    /// consecutive fragments that arrive within the window (each call appends onto
+    /// whatever's already pending) so a fast continuation reaches groundAndRespond as
+    /// one combined turn instead of triggering a response to the first fragment alone.
+    private func scheduleVoiceResponse(_ transcript: String) {
+        pendingVoiceTranscript = pendingVoiceTranscript.map { "\($0) \(transcript)" } ?? transcript
+        voiceResponseTask?.cancel()
+        voiceResponseTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.responseDebounceMs * 1_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.voiceResponseTask = nil
+            guard let text = self.pendingVoiceTranscript else { return }
+            self.pendingVoiceTranscript = nil
+            self.groundAndRespond(to: text, session: self.client, isVoice: true)
+        }
+    }
+
+    /// Samples mic input level (via `audio.onInputLevel`, fed into
+    /// `pendingMicLevelSamples` regardless of `state` while this is running) for
+    /// `durationMs` and resolves true only if the *average* clears `level` — echo
+    /// residual tends to be a brief spike rather than the sustained energy genuine
+    /// continued speech has, so requiring the average (not "every single sample", which
+    /// would also reject real speech's natural brief dips) over a stretch of time is
+    /// the actual discriminator. Mirrors web-demo/static/app.js's
+    /// `confirmSustainedMicLevel`. Resolves true (i.e. doesn't block a real barge-in) if
+    /// no samples arrived at all during the window, since that means there's no signal
+    /// to judge either way.
+    private func confirmSustainedMicLevel(durationMs: UInt64, level: Float) async -> Bool {
+        pendingMicLevelSamples = []
+        try? await Task.sleep(nanoseconds: durationMs * 1_000_000)
+        let samples = pendingMicLevelSamples ?? []
+        pendingMicLevelSamples = nil
+        guard !samples.isEmpty else { return true }
+        let average = samples.reduce(0, +) / Float(samples.count)
+        return average >= level
+    }
+
+    /// User barged in — stop the assistant immediately. Not calling
+    /// finalizeAssistantTurn() here is deliberate: this is an interrupted, incomplete
+    /// reply, not a finished turn, so it's discarded rather than persisted half-formed
+    /// (matches web-demo's app.js's handleBargeIn).
+    private func handleVoiceBargeIn() {
+        audio.interruptPlayback()
+        client.cancelResponse()
+        voiceResponsePending = false
+        assistantLineIndex = nil
+        setState(.listening)
     }
 
     // ---- text session (typing + dictation-to-text; ported from
@@ -524,6 +691,7 @@ final class ConversationViewModel: ObservableObject {
 
     func stopTextSession(reason: String? = nil) {
         pendingTextSessionMessage = nil
+        textResponsePending = false
         textClient.disconnect()
         setTextState(.idle)
         textSessionError = reason
@@ -531,12 +699,13 @@ final class ConversationViewModel: ObservableObject {
 
     private func submitTextSessionMessage(_ text: String) {
         appendUserTurn(text)
-        // Paired with the assistant's reply once it's done (see
-        // finalizeAssistantTurn(pairedUserText:)) to run memory extraction on the
-        // complete exchange.
-        pendingTextSessionUserText = text
+        // pendingTextSessionUserText is set inside groundAndRespond itself now (it needs
+        // to read whatever was there *before* overwriting, to concatenate onto a stale
+        // pending response — see that function) -- paired with the assistant's reply
+        // once it's done (see finalizeAssistantTurn(pairedUserText:)) to run memory
+        // extraction on the complete exchange.
         textClient.sendUserText(text)
-        groundAndRespond(to: text, session: textClient)
+        groundAndRespond(to: text, session: textClient, isVoice: false)
     }
 
     private func armTextConnectTimeout() {
@@ -586,6 +755,7 @@ final class ConversationViewModel: ObservableObject {
 
         textClient.onResponseDone = { [weak self] in
             guard let self else { return }
+            self.textResponsePending = false
             self.finalizeAssistantTurn(pairedUserText: self.pendingTextSessionUserText)
             self.pendingTextSessionUserText = nil
         }

@@ -37,6 +37,18 @@ final class AudioIOManager {
     var onInputLevel: ((Float) -> Void)?
     var onOutputLevel: ((Float) -> Void)?
 
+    /// Checked against a real bug found on the web port (2026-08-26): there,
+    /// `getUserMedia()` (mic capture, with `echoCancellation: true`) was called *before*
+    /// the `<audio>` element playback routes through even existed, so the browser's echo
+    /// canceller had no reference signal to cancel against at the moment it was
+    /// negotiated -- a plausible cause of the assistant's own voice being picked up as
+    /// user input. No analogous ordering hazard here: `.voiceChat` mode's echo
+    /// cancellation is a session-category-level feature negotiated once by `setCategory`/
+    /// `setActive` below, and input + output run through the *same* `AVAudioEngine`
+    /// starting from the same `engine.start()` call -- there's no separate, later step
+    /// that first establishes "what's currently playing" for AEC to reference. Recorded
+    /// here so a future port of some other AEC-adjacent web fix doesn't get blindly
+    /// copied over without checking whether iOS's architecture actually has the same gap.
     func start() throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
