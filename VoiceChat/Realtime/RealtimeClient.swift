@@ -112,7 +112,23 @@ final class RealtimeClient: NSObject {
         receiveTask = Task { [weak self, eventLoopGroup] in
             guard let self else { return }
             do {
-                let channel = try await Self.openWebSocket(group: eventLoopGroup, host: host, port: port, uri: uri, apiKey: apiKey, isOpenAI: isOpenAI)
+                // Real-device report (2026-08-27): a connection hung with *no* log line
+                // at all between "connect()" and either "WebSocket upgrade succeeded" or
+                // "connect failed" -- meaning openWebSocket() itself never returned,
+                // success or failure. NIOTSConnectionBootstrap's connectTimeout(5s) only
+                // bounds the TCP/TLS connect phase; it does not cover the subsequent
+                // HTTP-Upgrade round trip openWebSocket()'s channelInitializer performs
+                // (send the Upgrade request, wait for the 101 response) -- if TCP/TLS
+                // connects fine but the server never responds to (or drops) the upgrade
+                // request specifically, nothing in the NIO layer ever times that out, and
+                // the only thing that eventually notices is ConversationViewModel's own
+                // generic 8s UI timer, which has no way to explain *what* was stuck.
+                // Wrapping the whole call in an explicit timeout (6s: past the 5s TCP
+                // bound, short of the 8s UI bound) turns that silent, unexplained hang
+                // into a real, logged, actionable error instead.
+                let channel = try await Self.withTimeout(seconds: 6) {
+                    try await Self.openWebSocket(group: eventLoopGroup, host: host, port: port, uri: uri, apiKey: apiKey, isOpenAI: isOpenAI)
+                }
                 Self.log("WebSocket upgrade succeeded, channel open")
                 try await channel.executeThenClose { inbound, outbound in
                     await MainActor.run {
@@ -150,6 +166,32 @@ final class RealtimeClient: NSObject {
     /// search/filter for "[RealtimeClient]".
     private static func log(_ message: String) {
         print("[RealtimeClient] \(message)")
+    }
+
+    private struct TimeoutError: LocalizedError {
+        let seconds: Double
+        var errorDescription: String? { "timed out after \(seconds)s" }
+    }
+
+    /// Races `operation` against a plain `Task.sleep` -- Swift concurrency has no
+    /// built-in "await this with a deadline" for an arbitrary async call, and Task
+    /// cancellation is cooperative (cancelling a task only sets a flag; it doesn't
+    /// forcibly abort whatever `operation` is currently awaiting unless that specific
+    /// call checks for cancellation itself), so this is the standard structured-
+    /// concurrency pattern for bounding one: `group.cancelAll()` requests cancellation
+    /// of whichever task didn't finish first, but doesn't guarantee it stops
+    /// immediately -- see this call site's comment for why that's still strictly better
+    /// than no bound at all.
+    private static func withTimeout<T: Sendable>(seconds: Double, operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw TimeoutError(seconds: seconds)
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
     }
 
     /// Builds the connection and performs the WebSocket upgrade. A free function (no
