@@ -109,7 +109,37 @@ final class RealtimeClient: NSObject {
         // timer gave up.
         Self.log("connect() host=\(host) port=\(port) uri=\(uri)")
 
+        // TEMP DIAGNOSTIC (2026-08-27, round 2): the withTimeout(seconds: 6) wrapper
+        // around openWebSocket() below never fired on real-device retest either -- no
+        // "connect failed: timed out after 6.0s" ever printed, even though the hang
+        // clearly lasted well past 6s (the repeated "send() called with no outbound
+        // channel" lines kept going). A correctly-racing withThrowingTaskGroup should
+        // have logged that regardless of what's wrong inside openWebSocket() itself,
+        // since the sleep-based timeout task is independent of it -- so either this
+        // build isn't what's actually running, or something inside openWebSocket() is
+        // *blocking a thread* rather than cooperatively suspending, which can starve
+        // Swift Concurrency's whole (small, fixed-size) global executor thread pool --
+        // if that pool has no free thread, *nothing* queued on it runs, including the
+        // timeout task's own resumption after its sleep. This independent heartbeat
+        // (started before the connection attempt, on its own Task, only interacting
+        // with the connect logic via cancellation) directly tests that: if it keeps
+        // logging every 2s throughout a hang, Swift Concurrency itself is fine and
+        // withTimeout has a real bug worth re-examining; if it also goes silent, that's
+        // hard evidence of thread-pool starvation from a blocking call somewhere in the
+        // NIOTransportServices/NIO bootstrap -- a structural problem no timeout wrapper
+        // built on the same starved pool could ever catch.
+        let heartbeatTask = Task {
+            var tick = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if Task.isCancelled { return }
+                tick += 1
+                Self.log("heartbeat #\(tick) (Swift concurrency still scheduling tasks)")
+            }
+        }
+
         receiveTask = Task { [weak self, eventLoopGroup] in
+            defer { heartbeatTask.cancel() }
             guard let self else { return }
             do {
                 // Real-device report (2026-08-27): a connection hung with *no* log line
