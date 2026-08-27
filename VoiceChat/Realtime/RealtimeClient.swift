@@ -203,24 +203,59 @@ final class RealtimeClient: NSObject {
         var errorDescription: String? { "timed out after \(seconds)s" }
     }
 
-    /// Races `operation` against a plain `Task.sleep` -- Swift concurrency has no
-    /// built-in "await this with a deadline" for an arbitrary async call, and Task
-    /// cancellation is cooperative (cancelling a task only sets a flag; it doesn't
-    /// forcibly abort whatever `operation` is currently awaiting unless that specific
-    /// call checks for cancellation itself), so this is the standard structured-
-    /// concurrency pattern for bounding one: `group.cancelAll()` requests cancellation
-    /// of whichever task didn't finish first, but doesn't guarantee it stops
-    /// immediately -- see this call site's comment for why that's still strictly better
-    /// than no bound at all.
+    /// Trivial "resume exactly once" guard for the checked continuation in `withTimeout`
+    /// below -- both the operation and the timeout can race to resume it, and
+    /// `CheckedContinuation` traps if resumed twice. `@unchecked Sendable` because the
+    /// lock is the actual synchronization; there's nothing for the compiler to verify.
+    private final class ResumeOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var didResume = false
+        func attempt() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !didResume else { return false }
+            didResume = true
+            return true
+        }
+    }
+
+    /// Races `operation` against a plain `Task.sleep`, returning/throwing the instant
+    /// either one finishes -- WITHOUT waiting for the loser.
+    ///
+    /// A first version of this (2026-08-27) used `withThrowingTaskGroup`, which turned
+    /// out to be a real bug, not just a "not guaranteed immediate" caveat: a structured
+    /// `TaskGroup` does not return control to its caller until *every* child task has
+    /// actually finished, including ones you've called `cancelAll()` on -- cancellation
+    /// only sets a flag, and if the cancelled task's own code never checks it (observed
+    /// live: a real-device retest showed a diagnostic heartbeat logging every 2s,
+    /// proving Swift Concurrency itself was fine, while this function's 6s timeout never
+    /// fired even 40+ seconds in -- `openWebSocket()`'s NIOTransportServices bootstrap
+    /// call apparently never observes cancellation), the *whole group* -- timeout child
+    /// included -- hangs right along with it. The timeout branch was "firing" internally
+    /// the entire time; the group just refused to hand that back.
+    ///
+    /// This version uses two independent, unstructured `Task`s racing to resume a single
+    /// checked continuation. Unlike a `TaskGroup`, nothing here waits for both branches
+    /// to finish -- `withCheckedThrowingContinuation` returns as soon as `resume` is
+    /// called once, by whichever branch got there first. The loser (typically the hung
+    /// `operation()` call) is left running, unawaited, and simply discarded -- accepted
+    /// here since its only side effect is an idle in-flight connection attempt, not
+    /// anything this class still has a reference to once it errors out.
     private static func withTimeout<T: Sendable>(seconds: Double, operation: @escaping @Sendable () async throws -> T) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask { try await operation() }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                throw TimeoutError(seconds: seconds)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            let once = ResumeOnce()
+            Task {
+                do {
+                    let value = try await operation()
+                    if once.attempt() { continuation.resume(returning: value) }
+                } catch {
+                    if once.attempt() { continuation.resume(throwing: error) }
+                }
             }
-            defer { group.cancelAll() }
-            return try await group.next()!
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                if once.attempt() { continuation.resume(throwing: TimeoutError(seconds: seconds)) }
+            }
         }
     }
 
