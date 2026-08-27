@@ -99,26 +99,44 @@ final class RealtimeClient: NSObject {
         fragmentBuffer = nil // this instance may be reused across connect()/disconnect() cycles
         let initialSessionUpdate = RealtimeOutgoingEvent.sessionUpdate(instructions: instructions, voice: voice, turnDetection: turnDetection, autoRespond: autoRespond, modalities: modalities)
 
+        // Real-device report (2026-08-27): a connection that never comes up surfaces
+        // only the generic "连接超时，请重试" UI text (ConversationViewModel's own 8s
+        // timer, not onError -- see that timer's doc comment) with nothing in the
+        // console to say *where* it got stuck, because this class never logged anything
+        // of its own. These print()s give the next real-device attempt an actual trail
+        // to read: did the socket/TLS/WebSocket-upgrade even complete, did the initial
+        // session.update get written, and what (if anything) came back before the UI
+        // timer gave up.
+        Self.log("connect() host=\(host) port=\(port) uri=\(uri)")
+
         receiveTask = Task { [weak self, eventLoopGroup] in
             guard let self else { return }
             do {
                 let channel = try await Self.openWebSocket(group: eventLoopGroup, host: host, port: port, uri: uri, apiKey: apiKey, isOpenAI: isOpenAI)
+                Self.log("WebSocket upgrade succeeded, channel open")
                 try await channel.executeThenClose { inbound, outbound in
                     await MainActor.run {
                         self.outbound = outbound
                         self.startPingTask()
                     }
                     try await Self.write(initialSessionUpdate, to: outbound)
+                    Self.log("sent initial session.update")
                     for try await frame in inbound {
                         if Task.isCancelled { return }
                         await self.handleFrame(frame)
-                        if frame.opcode == .connectionClose { return }
+                        if frame.opcode == .connectionClose {
+                            Self.log("received connectionClose frame")
+                            return
+                        }
                     }
                 }
+                Self.log("receive loop ended, calling onDisconnect")
                 await MainActor.run { self.onDisconnect?(nil) }
             } catch is CancellationError {
                 // disconnect() cancelled receiveTask -- expected, not an error to surface.
+                Self.log("receiveTask cancelled (disconnect() called)")
             } catch {
+                Self.log("connect failed: \(error)")
                 await MainActor.run { self.onError?("connect failed: \(error)") }
             }
             await MainActor.run {
@@ -126,6 +144,12 @@ final class RealtimeClient: NSObject {
                 self.stopPingTask()
             }
         }
+    }
+
+    /// Prefixed so these are easy to filter for in the Xcode/Console.app log --
+    /// search/filter for "[RealtimeClient]".
+    private static func log(_ message: String) {
+        print("[RealtimeClient] \(message)")
     }
 
     /// Builds the connection and performs the WebSocket upgrade. A free function (no
@@ -289,11 +313,19 @@ final class RealtimeClient: NSObject {
     }
 
     private func send(_ payload: [String: Any]) {
-        guard let outbound else { return }
+        guard let outbound else {
+            // Silent no-op by design (see the doc comment on this being harmless when a
+            // debounced turn fires after disconnect), but a genuinely silent hang -- a
+            // caller trying to send before the socket ever finished connecting -- would
+            // look identical without this log.
+            Self.log("send() called with no outbound channel yet -- dropped: \(payload["type"] as? String ?? "?")")
+            return
+        }
         Task { [weak self] in
             do {
                 try await Self.write(payload, to: outbound)
             } catch {
+                Self.log("send failed: \(error)")
                 await MainActor.run { self?.onError?("send failed: \(error)") }
             }
         }
@@ -338,7 +370,11 @@ final class RealtimeClient: NSObject {
     }
 
     private func handle(_ data: Data) {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            Self.log("received frame that didn't parse as JSON (\(data.count) bytes)")
+            return
+        }
+        Self.log("received event type=\(json["type"] as? String ?? "?")")
 
         switch RealtimeIncomingEvent(json: json) {
         case .audioDelta(let base64):
@@ -358,6 +394,7 @@ final class RealtimeClient: NSObject {
         case .speechStarted:
             onSpeechStarted?()
         case .sessionUpdated:
+            Self.log("received session.updated (ack)")
             pendingInstructionsAck?()
             pendingInstructionsAck = nil
         case .responseDone:
