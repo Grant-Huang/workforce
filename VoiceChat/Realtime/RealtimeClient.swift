@@ -211,8 +211,24 @@ final class RealtimeClient: NSObject {
         // failing with a real error. 5s (shorter than the 8s UI timeout) so a genuine
         // failure surfaces an actionable NIO error via onError before the generic
         // fallback message fires.
+        // TEMP DIAGNOSTIC (2026-08-27): real-device testing found the connection hanging
+        // silently -- no TLS alert, no upgrade response, nothing -- against *two*
+        // unrelated servers (Aliyun's endpoint AND a totally separate relay host that
+        // the same device reaches instantly via Chrome), which rules out network path/
+        // routing and points at this client's own connection setup. The one genuinely
+        // unusual thing this code does versus a normal TLS client is forcing ALPN down
+        // to *only* "http/1.1" via http1OnlyTLSOptions() below -- a line that was never
+        // actually verified to compile or behave correctly on real hardware (see its own
+        // doc comment). Dropping back to the default TLS options (normal ALPN
+        // negotiation, whatever the OS negotiates) isolates whether that specific call is
+        // what's hanging. If this fixes it, the ALPN restriction needs a different
+        // implementation (e.g. offering ["http/1.1"] via the list-based API instead of
+        // whatever sec_protocol_options_add_tls_application_protocol was actually doing);
+        // if this does NOT fix it, the hang is somewhere else in this bootstrap/upgrade
+        // pipeline and the original h2-upgrade-mismatch bug this was guarding against
+        // (see class doc comment) may resurface against servers that pick h2 -- expected,
+        // and useful signal either way.
         let bootstrap = NIOTSConnectionBootstrap(group: group)
-            .tlsOptions(http1OnlyTLSOptions())
             .connectTimeout(.seconds(5))
 
         // NOTE: unlike the ClientBootstrap-based reference example (Sources/
