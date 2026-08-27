@@ -35,11 +35,14 @@ enum RealtimeOutgoingEvent {
                 // (RealtimeConfigStore.vadThreshold/vadSilenceDurationMs), mirroring the
                 // web port's tuning panel (app.js's TUNING_DEFAULTS) -- see
                 // RealtimeConfigStore's defaultVadThreshold/defaultVadSilenceDurationMs
-                // for the full 0.5->0.65->0.55 / 500->800->900 tuning history that set
-                // today's defaults. iOS has NOT gotten the web's client-side
-                // confirmSustainedMicLevel confirmation gate yet -- it relies on
-                // AVAudioSession's .voiceChat mode (real hardware/system AEC) instead,
-                // unconfirmed on-device (see AudioIOManager).
+                // for the full 0.5->0.65->0.55->0.6 / 500->800->900 tuning history that
+                // set today's defaults. iOS now also has its own port of the web's
+                // client-side confirmSustainedMicLevel confirmation gate (2026-08-27,
+                // see ConversationViewModel's onSpeechStarted/confirmSustainedMicLevel)
+                // as defense-in-depth on top of AVAudioSession's .voiceChat mode
+                // (real hardware/system AEC), rather than relying on the hardware AEC
+                // alone -- neither side of that defense is confirmed on real iOS
+                // hardware yet.
                 "threshold": RealtimeConfigStore.vadThreshold,
                 "prefix_padding_ms": 300,
                 "silence_duration_ms": RealtimeConfigStore.vadSilenceDurationMs,
