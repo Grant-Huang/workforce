@@ -743,14 +743,30 @@ async function start() {
     await AgentNexusBridge.pullMemory();
     ConversationHistory.retryUnsynced();
 
+    // setupPlayback() *before* getUserMedia() -- deliberately, not incidental order.
+    // Real-device report (2026-08-26): with all four tuning-panel presets, the
+    // assistant would interrupt its own reply and restart, repeatedly (3-8 times),
+    // even while the user stayed completely silent -- ruling out VAD splitting a real
+    // utterance (nothing to split) and matching the user's own guess: its own voice
+    // being picked up as input. echoCancellation:true on the mic constraints is
+    // supposed to prevent exactly this, using whatever's currently playing out of the
+    // tab as the reference signal to cancel -- but getUserMedia() used to be called
+    // *before* setupPlayback() ever created the <audio> element that routing depends
+    // on (see that function's comment on why routing through a real <audio> element
+    // matters for AEC at all). Requesting the mic stream before there's any playback
+    // output for the browser to use as a reference is a plausible reason AEC wasn't
+    // effectively canceling the assistant's own voice -- there was nothing to cancel
+    // against yet at the moment the mic stream (and its AEC negotiation) was set up.
+    // Not acoustically verified in this sandbox (no real audio hardware here) -- needs
+    // real-device confirmation.
+    await setupPlayback();
+
     try {
       micStream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
     } catch (e) {
       statusEl.textContent = `麦克风权限失败：${e.message}（仍可以打字对话）`;
       micStream = null;
     }
-
-    await setupPlayback();
 
     if (micStream) {
       captureCtx = new (window.AudioContext || window.webkitAudioContext)();
