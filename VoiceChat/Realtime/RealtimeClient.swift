@@ -82,6 +82,19 @@ final class RealtimeClient: NSObject {
     /// got a working session (a real observed Qwen failure mode, see
     /// docs/qwen-realtime-voice-setup.md) looked identical to a healthy connection.
     func connect(baseURL: String, apiKey: String, model: String, instructions: String, voice: String, turnDetection: String? = "server_vad", autoRespond: Bool = false, modalities: [String] = ["audio", "text"], onSessionReady: @escaping () -> Void) {
+        // TEMP DIAGNOSTIC (2026-08-27, round 3): the custom NIOTransportServices pipeline
+        // (openWebSocket() below) has never been confirmed to complete a handshake on real
+        // hardware -- every real-device test this session has hung on the HTTP-Upgrade
+        // round trip (now proven by a working timeout: TCP/TLS connects fast, the Upgrade
+        // request/101-response never completes), against two unrelated servers, with and
+        // without a forced ALPN restriction. Fires a side-by-side connection attempt using
+        // Apple's own URLSessionWebSocketTask -- unrelated to any of this class's pipeline
+        // code -- against the same relay host the device already reaches instantly via
+        // Chrome, to test whether the *official* API can do what this custom one can't.
+        // Hardcoded/throwaway: not wired to baseURL/model, doesn't affect the real connect
+        // attempt below, safe to delete once this question is answered either way.
+        Self.runURLSessionDiagnostic()
+
         guard var components = URLComponents(string: baseURL) else {
             onError?("invalid WebSocket URL: \(baseURL)")
             return
@@ -196,6 +209,31 @@ final class RealtimeClient: NSObject {
     /// search/filter for "[RealtimeClient]".
     private static func log(_ message: String) {
         print("[RealtimeClient] \(message)")
+    }
+
+    /// TEMP DIAGNOSTIC (2026-08-27, round 3) -- see the call site in connect() for why
+    /// this exists. Fires a completely independent connection attempt via
+    /// `URLSessionWebSocketTask` (Apple's own stack, nothing shared with this class's
+    /// NIOTransportServices pipeline) against the relay host, purely to answer "can the
+    /// official API connect here at all, on this device, right now" -- a `sendPing` only
+    /// completes once the WebSocket handshake has actually finished, so success here
+    /// means a real, completed upgrade, not just a TCP/TLS connect. Safe to delete once
+    /// answered; not wired into the app's real connection path at all.
+    private static func runURLSessionDiagnostic() {
+        guard let url = URL(string: "wss://omni.inkpath.cc/ws") else { return }
+        Self.log("[diag] URLSessionWebSocketTask connecting to \(url)")
+        let task = URLSession.shared.webSocketTask(with: url)
+        task.resume()
+        let start = Date()
+        task.sendPing { error in
+            let elapsed = String(format: "%.1f", Date().timeIntervalSince(start))
+            if let error {
+                Self.log("[diag] URLSessionWebSocketTask ping FAILED after \(elapsed)s: \(error)")
+            } else {
+                Self.log("[diag] URLSessionWebSocketTask ping SUCCEEDED after \(elapsed)s -- official API connects fine here")
+            }
+            task.cancel(with: .goingAway, reason: nil)
+        }
     }
 
     private struct TimeoutError: LocalizedError {
