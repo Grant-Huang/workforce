@@ -56,6 +56,26 @@ final class AudioIOManager {
 
         let input = engine.inputNode
         let hardwareFormat = input.outputFormat(forBus: 0)
+        // Real-device/simulator crash (2026-08-27): `installTap` below throws an
+        // *uncaught Objective-C exception* (not a catchable Swift error) when handed an
+        // invalid format -- observed in the iOS Simulator as "Could not find default
+        // device for dIn" / "couldn't get default input device" followed by a hard crash
+        // in `IsFormatSampleRateAndChannelCountValid`, because the Simulator had no
+        // usable audio input device routed to it and `hardwareFormat` came back as 0Hz/0
+        // channels. (Check the Simulator's I/O > Audio Input menu and macOS System
+        // Settings > Sound > Input if this keeps happening there.) The same guard is
+        // cheap insurance against any real-device edge case where the input route
+        // momentarily has no valid format (e.g. a Bluetooth mic disconnecting mid-
+        // session) -- failing fast with a plain Swift error here routes into
+        // ConversationViewModel.start()'s existing `catch` -> "麦克风启动失败：..." error
+        // state instead of a hard app crash.
+        guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
+            throw NSError(
+                domain: "AudioIOManager",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "找不到可用的麦克风输入设备（模拟器上常见：检查 Simulator 的 I/O > Audio Input 菜单，以及 Mac 系统设置里的 声音 > 输入）"]
+            )
+        }
         inputConverter = AVAudioConverter(from: hardwareFormat, to: inputWireFormat)
 
         engine.attach(playerNode)
