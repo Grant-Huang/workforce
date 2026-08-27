@@ -1505,7 +1505,15 @@ voiceSelect.addEventListener("change", () => {
 // session.update or renegotiating the worklet mid-playback, and "change setting, tap
 // start again" is a perfectly fast loop for this kind of tuning.
 const TUNING_STORAGE_KEY = "voiceChat.tuning";
-const TUNING_DEFAULTS = { threshold: 0.55, silenceMs: 900, fadeMs: 15, prebufferMs: 100 };
+// threshold 0.55->0.6 and prebufferMs 100->150 (2026-08-27): real-device A/B/C/D test
+// across four presets, after the AEC-ordering fix (setupPlayback() before
+// getUserMedia()) -- this combination (0.6/900/15/150) came back as the best-performing
+// with headphones, basically no self-interruption. Loudspeaker/car-Bluetooth playback
+// (this app's actual target scenario) hasn't been retested against the AEC fix
+// specifically yet -- headphones structurally avoid the acoustic-echo class of bug
+// regardless of whether AEC works, so a clean headphone result doesn't by itself confirm
+// the AEC fix helped over a real speaker.
+const TUNING_DEFAULTS = { threshold: 0.6, silenceMs: 900, fadeMs: 15, prebufferMs: 150 };
 
 // Explanation text for the "?" tip buttons next to each field above -- threshold/
 // silenceMs wording mirrors VoiceChat/Settings/SettingsView.swift's SettingsTip enum

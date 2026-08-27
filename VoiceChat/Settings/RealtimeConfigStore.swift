@@ -29,8 +29,14 @@ enum RealtimeConfigStore {
     static let defaultVoice = "Serena"
     /// Same tuning history/parity note as the web port's TUNING_DEFAULTS (app.js) and
     /// RealtimeModels.swift's old hardcoded literals this replaced — see that file's
-    /// turn_detection comment for the full 0.5→0.65→0.55 / 500→800→900 story.
-    static let defaultVadThreshold = 0.55
+    /// turn_detection comment for the full 0.5→0.65→0.55→0.6 / 500→800→900 story.
+    /// 0.55→0.6 (2026-08-27): real-device A/B/C/D preset testing on the web port (after
+    /// its AEC-ordering fix) came back with 0.6/900ms as the best-performing combo —
+    /// ported here for parity, not independently confirmed on iOS hardware. iOS has no
+    /// equivalent to the web port's fadeMs/prebufferMs (AVAudioPlayerNode handles
+    /// buffering natively — see AudioIOManager), so only threshold/silence_duration_ms
+    /// carry over.
+    static let defaultVadThreshold = 0.6
     static let defaultVadSilenceDurationMs = 900
 
     /// Trimmed down to the requested shortlist (2026-08-23) — was a 14-voice curated

@@ -54,7 +54,11 @@ const DEFAULT_FADE_MS = 15;
 // texture/roughness in the voice instead of discrete pops -- same mechanism, different
 // perceived result at different trigger rates. DEFAULT_PREBUFFER_MS restores that
 // safety margin, just inside the worklet instead of the old scheduling code.
-const DEFAULT_PREBUFFER_MS = 100;
+// 100->150 (2026-08-27): matches app.js's TUNING_DEFAULTS after real-device A/B/C/D
+// testing -- this value is only the fallback used before the tuning panel's
+// "configure" message arrives, kept in sync with that default rather than fixed
+// separately.
+const DEFAULT_PREBUFFER_MS = 150;
 
 class PCMPlayerProcessor extends AudioWorkletProcessor {
   constructor() {
