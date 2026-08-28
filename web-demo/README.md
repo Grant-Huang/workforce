@@ -1,6 +1,6 @@
 # 语音对话网页 Demo
 
-跟 `VoiceChat/` 那个 iOS App 用的是同一套 Realtime API 协议（`session.update` / `input_audio_buffer.append` / `response.audio.delta` / …），做成网页版是因为 iOS App 没法在这个开发环境里编译运行，这个 demo 可以直接在浏览器里跑起来实测——记忆检索、AgentNexus 同步这些设计都是先在这里验证过、再同步改回 iOS 项目的。
+对接 Realtime API 协议（`session.update` / `input_audio_buffer.append` / `response.audio.delta` / …），这个 demo 可以直接在浏览器里跑起来实测。项目最早同时维护一个原生 iOS App，跑同一套协议，2026-08-28 决定暂时移除只保留网页版（见根目录 `README.md`）——这份文档里偶尔出现的 `VoiceChat/`（iOS 端源码路径）引用是那段历史留下的，指的是已经从当前代码里删除、但还在 git 历史里的内容。
 
 界面：类似 ChatGPT 主对话框——顶部状态栏、中间滚动的对话气泡、底部一个可以打字的输入框 + 一个开始/结束合一的大圆按钮（不是两个按钮，点一下开始，再点一下结束，图标和颜色跟着状态变）。打字发送消息会自动开始会话，不用先点麦克风。
 
