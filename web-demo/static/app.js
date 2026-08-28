@@ -804,8 +804,7 @@ async function start() {
 
     lastConnErrorMessage = null;
     await new Promise((resolveOpen, rejectOpen) => {
-      const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
-      ws = new WebSocket(`${wsProto}//${location.host}/ws`);
+      ws = new WebSocket(ServerConfig.wsUrl("/ws"));
       ws.onopen = resolveOpen;
       ws.onerror = () => {
         lastConnErrorMessage = "连接失败：WebSocket 出错，请检查网络后重试";
@@ -1052,8 +1051,7 @@ async function startTextSession() {
 
     textLastConnErrorMessage = null;
     await new Promise((resolveOpen) => {
-      const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
-      textWs = new WebSocket(`${wsProto}//${location.host}/ws`);
+      textWs = new WebSocket(ServerConfig.wsUrl("/ws"));
       textWs.onopen = resolveOpen;
       textWs.onerror = () => {
         textLastConnErrorMessage = "连接失败：WebSocket 出错，请检查网络后重试";
@@ -1224,8 +1222,7 @@ async function startDictation() {
   const silentGain = dictationCaptureCtx.createGain();
   silentGain.gain.value = 0;
 
-  const dictationWsProto = location.protocol === "https:" ? "wss:" : "ws:";
-  dictationWs = new WebSocket(`${dictationWsProto}//${location.host}/ws`);
+  dictationWs = new WebSocket(ServerConfig.wsUrl("/ws"));
   dictationWs.onopen = () => {
     if (dictationWs.readyState !== WebSocket.OPEN) return;
     dictationWs.send(JSON.stringify({
@@ -1430,7 +1427,7 @@ async function finishDictation(mode) {
     const abortTimer = setTimeout(() => controller.abort(), 65000);
     let res;
     try {
-      res = await fetch("/api/dictation-cleanup", {
+      res = await fetch(ServerConfig.apiUrl("/api/dictation-cleanup"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: raw }),
@@ -1628,7 +1625,7 @@ tuningPanel.addEventListener("click", (event) => {
 
 (async () => {
   try {
-    const res = await fetch("/api/config");
+    const res = await fetch(ServerConfig.apiUrl("/api/config"));
     const config = await res.json();
     voice = localStorage.getItem(VOICE_STORAGE_KEY) || config.voice || voice;
     populateVoiceSelect(config.voices || [{ id: voice, label: voice }], voice);

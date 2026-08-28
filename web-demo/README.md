@@ -44,6 +44,18 @@ python3 server.py
 
 Key 从仓库根目录的 `.env` 读取（`QWEN_API_KEY=...`），这个文件不会被提交到 Git（已加进 `.gitignore`）。
 
+## 对接 omni-server（可选，不用也不影响现有用法）
+
+默认情况下这个页面完全不变——WebSocket 和 `/api/*` 请求都打到同源的 `server.py`，跟一直以来一样。`static/serverConfig.js` 加了一层可选的后端地址配置，只有显式指定的时候才会生效：
+
+```
+http://127.0.0.1:8765/?server=http://127.0.0.1:8766
+```
+
+`?server=` 指向 [`omni-server`](https://github.com/Grant-Huang/omni-server)（一个独立部署的后端，见它的 README）监听的地址，页面会把语音/文字/口述三条 WebSocket 连接和 `/api/config`、`/api/dictation-cleanup`、`/api/memory-extract` 三个 HTTP 请求都改发到这个地址。选择会存进 `localStorage`，刷新页面不用重新带参数；用 `?server=`（空值）可以改回同源。
+
+注意：这条路径下 `server.py` 本身不再被使用（`omni-server` 接管了 `/ws` 和这三个 `/api/*`），但页面本身、静态资源、本地记忆（`LocalMemory`）、AgentNexus Mock 这些还是走原来的样子——omni-server 目前这版 MVP 是纯转发 + 一样的两个一次性接口，还没接管记忆（见 omni-server 的 `docs/mvp-plan.md`）。
+
 ## 已经跑通的连通性测试（2026-08-19）
 
 用这里的 `.env` 里的 Key，直接拿 Python `websockets` 库测了几个候选地址/型号（脚本类似 `server.py` 里连上游的那部分），结果：

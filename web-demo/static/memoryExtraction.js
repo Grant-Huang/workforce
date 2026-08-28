@@ -23,7 +23,7 @@ const MemoryExtraction = (() => {
 
     let facts;
     try {
-      const res = await fetch("/api/memory-extract", {
+      const res = await fetch(ServerConfig.apiUrl("/api/memory-extract"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userText, assistantText, knownJargon }),
