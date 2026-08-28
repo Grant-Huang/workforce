@@ -962,8 +962,15 @@ function stop(reason) {
 }
 
 micBtn.addEventListener("click", () => {
-  if (state === STATE.IDLE) start();
-  else stop();
+  if (state === STATE.IDLE) {
+    // An idle-but-connected text session no longer blocks starting voice (see
+    // renderDictationUI's comment) -- close it first, silently (this is a deliberate
+    // mode switch, not an error, so no reason/toast).
+    if (textState !== TEXT_STATE.IDLE) stopTextSession();
+    start();
+  } else {
+    stop();
+  }
 });
 
 // ---- text session: typing + dictation-to-text output ----
@@ -1170,18 +1177,33 @@ function renderDictationUI() {
   const busy = dictationState !== DICTATION_STATE.IDLE;
   dictationStopBtn.disabled = dictationState !== DICTATION_STATE.RECORDING;
   dictationSendBtn.disabled = dictationState !== DICTATION_STATE.RECORDING;
-  // can't dictate while a live voice conversation OR a text session is connected
-  dictateBtn.disabled = state !== STATE.IDLE || textState !== TEXT_STATE.IDLE;
-  micBtn.disabled = busy || textState !== TEXT_STATE.IDLE; // can't start voice while dictating or texting
+  // Real bug found 2026-08-28: this used to also disable dictateBtn/micBtn whenever
+  // textState !== TEXT_STATE.IDLE -- but a text session only ever leaves READY via an
+  // error/close or the 5-minute idle timeout (armTextIdleTimer), there was no way to
+  // end it on demand. Since typing/dictating-to-text puts the session in READY and
+  // *keeps it there* (by design, so a back-and-forth text exchange doesn't reconnect
+  // every message), that meant doing either of those even once permanently blocked the
+  // mic button for up to 5 minutes -- reported live: "点击了语音转文字后，结束后再也
+  // 回不到实时语音模式". A connected-but-idle text session holds no hardware resource
+  // (unlike a live voice call, which owns the mic) and is safe to just close -- see the
+  // micBtn click handler and startDictation() below, which now close an active text
+  // session first instead of refusing to proceed. Only a live *voice* call still blocks
+  // these (real mutual exclusion: two conversations writing into the shared reply
+  // bubble/history state at once, or fighting over the mic).
+  dictateBtn.disabled = state !== STATE.IDLE;
+  micBtn.disabled = busy;
   textInput.disabled = state !== STATE.IDLE; // can't type while a live voice conversation is connected
 }
 
 async function startDictation() {
   if (dictationState !== DICTATION_STATE.IDLE) return;
-  if (state !== STATE.IDLE || textState !== TEXT_STATE.IDLE) {
-    statusEl.textContent = "先结束当前的对话，再用口述输入";
+  if (state !== STATE.IDLE) {
+    statusEl.textContent = "先结束当前的语音对话，再用口述输入";
     return;
   }
+  // An idle-but-connected text session no longer blocks starting dictation (see
+  // renderDictationUI's comment) -- close it first, silently.
+  if (textState !== TEXT_STATE.IDLE) stopTextSession();
 
   dictationRawText = "";
   dictationState = DICTATION_STATE.RECORDING;
