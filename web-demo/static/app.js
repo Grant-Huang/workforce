@@ -44,7 +44,7 @@ let playAnalyser = null; // taps the playback graph, read while SPEAKING -- see 
 let orbAnimationId = null;
 let assistantBubbleEl = null;
 let assistantHasDelta = false;
-let voice = "Serena";
+let voice = "Jennifer";
 let startPromise = null; // in-flight start(), so typed messages can await a session already starting
 
 // Explicit request for the standard WebRTC-family constraints -- echoCancellation
@@ -481,6 +481,11 @@ const BASE_INSTRUCTIONS = `你是一个语音助手，正在和用户实时语�
 说话方式：
 - 像日常聊天一样自然口语化，不要用书面语（比如不要说"因此""综上所述""值得注意的是"）。
 - 不要用任何视觉格式：不用列表符号、编号、加粗，也不要读网址或代码。
+
+数字/编号的念法：
+- 电话号码、产品编码、型号、订单号、验证码这类"编号"性质的数字，每一位数字要一个一个单独念出来（比如"138-1234-5678"念成"一三八杠一二三四杠五六七八"，不要读成"一百三十八万一千二百三十四..."这种整数读法）。
+- 这类编号里的"-"要念成"杠"，不要念成"减"；只有在数学算式（比如"5-3=2"）里出现的"-"才是减号，念"减"。
+- 年份、金额、时间、数量这些正常的数字仍按日常习惯念（比如"2026年"念"二零二六年"或"两千零二十六年"都行，"100元"照常念"一百元"），不要套用编号的逐位读法。
 
 回答长度：先判断这条问题属于哪一类，再按对应的长度来，不要机械地都说成一两句话或者都展开成一大段：
 - **查询类**（问日期时间、单一事实、确认性问题）：1-3 句话说完，给答案不给报告，除非用户明确要求展开。
