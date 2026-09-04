@@ -41,6 +41,12 @@
         </span>
         <input type="number" id="tunePrebufferMs" min="0" max="1000" step="10">
       </label>
+      <label>
+        <span class="tuningLabelRow">响应防抖 responseDebounceMs（改动即时生效，不用重开会话）
+          <button type="button" class="tipBtn" data-tip="responseDebounceMs" aria-label="说明">?</button>
+        </span>
+        <input type="number" id="tuneResponseDebounceMs" min="0" max="2000" step="50">
+      </label>
       <div class="tuningActions">
         <button type="button" id="tuningReset">重置默认值</button>
         <span class="tuningHint">下次点开始会话时生效</span>

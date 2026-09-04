@@ -377,18 +377,57 @@ const BARGE_IN_CONFIRM_LEVEL = 0.12; // same 0-1 scale as readAnalyserLevel()
 // barge-in path cancels that in-progress reply -- audible as self-interruption, not a
 // bug in the cancel logic itself, just a consequence of responding too eagerly.
 //
-// scheduleVoiceResponse below holds each transcript for RESPONSE_DEBOUNCE_MS before
-// actually calling handleUserTurn; input_audio_buffer.speech_started arriving during
-// that window cancels the pending timer instead of letting a reply start, so a
+// scheduleVoiceResponse below holds each transcript for tuning.responseDebounceMs
+// before actually calling handleUserTurn; input_audio_buffer.speech_started arriving
+// during that window cancels the pending timer instead of letting a reply start, so a
 // near-immediate continuation gets caught (and merged -- see handleUserTurn's
 // concatenation) before the assistant ever opens its mouth. This only catches
-// continuations that resume within RESPONSE_DEBOUNCE_MS of the transcript arriving --
-// longer thinking pauses still rely on silence_duration_ms itself not splitting the
-// utterance in the first place. Not acoustically tuned (no real audio hardware in this
-// sandbox) -- needs real-device confirmation and likely adjustment.
-const RESPONSE_DEBOUNCE_MS = 500;
+// continuations that resume within that window of the transcript arriving -- longer
+// thinking pauses still rely on silence_duration_ms itself not splitting the utterance
+// in the first place. Not acoustically tuned (no real audio hardware in this sandbox)
+// -- needs real-device confirmation and likely adjustment.
+//
+// 2026-08-28: real-user report that responses feel much slower than ~1-2 weeks ago,
+// "经常不止1.4秒" (often more than the 900ms silenceMs + 500ms debounce = ~1.4s this
+// and silence_duration_ms alone would predict) -- and that even right after these same
+// values were first tuned in, turnaround was still basically instant. Nothing in
+// app.js/server.py changed between the last tuning commit (ec1be78) and now that
+// touches the response pipeline (checked via git log), so this fixed 500ms default
+// isn't the (whole) explanation. This constant moved into the tuning panel
+// (tuning.responseDebounceMs, applied live -- see scheduleVoiceResponse below) so it's
+// adjustable without a redeploy, and PER_TURN_TIMING logging was added to
+// handleUserTurn/handleServerEvent to actually measure where time goes on the next
+// real test instead of guessing further.
 let voicePendingTranscript = null; // accumulated text waiting out the debounce window
 let voiceResponseTimer = null;
+
+// 2026-08-28: per-turn timing breakdown, added specifically to answer "where does the
+// time actually go" instead of guessing -- see the long comment above. Only tracks
+// voiceSession turns (the ones the "feels slow" report was about); reset on every new
+// transcript so a turn's marks can't leak into the next one's summary. Logged once
+// the first response.audio.delta of that turn arrives, since that's the moment the
+// user actually perceives "the AI started replying".
+let voiceTurnTiming = null;
+
+function markTurnTiming(label) {
+  if (!voiceTurnTiming) return;
+  voiceTurnTiming[label] = performance.now();
+}
+
+function logTurnTimingIfReady() {
+  const t = voiceTurnTiming;
+  if (!t || t.logged || !t.firstDelta) return;
+  t.logged = true;
+  const seg = (from, to) => (t[from] != null && t[to] != null ? `${Math.round(t[to] - t[from])}ms` : "?");
+  console.log(
+    "[turn timing] 静音判定→转写到达: (服务端,不可测) | " +
+    `转写到达→防抖触发: ${seg("transcriptAt", "debounceFiredAt")} | ` +
+    `防抖触发→session.update确认: ${seg("debounceFiredAt", "sessionUpdatedAckAt")} | ` +
+    `确认→response.create: ${seg("sessionUpdatedAckAt", "responseCreateSentAt")} | ` +
+    `response.create→首个音频: ${seg("responseCreateSentAt", "firstDelta")} | ` +
+    `转写到达→首个音频总计: ${seg("transcriptAt", "firstDelta")}`
+  );
+}
 
 function scheduleVoiceResponse(transcript) {
   voicePendingTranscript = voicePendingTranscript ? `${voicePendingTranscript} ${transcript}` : transcript;
@@ -397,8 +436,9 @@ function scheduleVoiceResponse(transcript) {
     voiceResponseTimer = null;
     const text = voicePendingTranscript;
     voicePendingTranscript = null;
+    markTurnTiming("debounceFiredAt");
     handleUserTurn(text, voiceSession);
-  }, RESPONSE_DEBOUNCE_MS);
+  }, tuning.responseDebounceMs);
 }
 
 function confirmSustainedMicLevel(analyser, durationMs, level) {
@@ -626,7 +666,9 @@ async function handleUserTurn(rawText, session) {
     }
     const instructions = `${BASE_INSTRUCTIONS}\n\n用户刚才明确要求记住这件事："${saveIntent.content}"，你已经帮TA记下了。只需要简短确认一句就行，不要复述内容、不要追问。`;
     await session.updater.updateInstructionsAndWait(instructions);
+    if (session === voiceSession) markTurnTiming("sessionUpdatedAckAt");
     sendEventOn(session.getWs(), { type: "response.create" });
+    if (session === voiceSession) markTurnTiming("responseCreateSentAt");
     session.responsePending = true;
     return;
   }
@@ -644,8 +686,10 @@ async function handleUserTurn(rawText, session) {
   } else {
     await session.updater.updateInstructionsAndWait(BASE_INSTRUCTIONS); // clear out any previous turn's injected memory
   }
+  if (session === voiceSession) markTurnTiming("sessionUpdatedAckAt");
 
   sendEventOn(session.getWs(), { type: "response.create" });
+  if (session === voiceSession) markTurnTiming("responseCreateSentAt");
   session.responsePending = true;
 }
 
@@ -669,6 +713,13 @@ function handleServerEvent(json) {
     case "response.audio.delta":
       playPCM16Chunk(json.delta);
       setState(STATE.SPEAKING);
+      // Only the *first* delta of a turn marks "when the reply actually started" --
+      // this event fires once per audio chunk, so guard against later chunks
+      // overwriting it.
+      if (voiceTurnTiming && voiceTurnTiming.firstDelta == null) {
+        markTurnTiming("firstDelta");
+        logTurnTimingIfReady();
+      }
       break;
     case "response.audio_transcript.delta":
       appendToAssistantBubble(json.delta);
@@ -679,6 +730,7 @@ function handleServerEvent(json) {
     case "conversation.item.input_audio_transcription.completed":
       if (json.transcript) {
         addBubble("user", json.transcript);
+        voiceTurnTiming = { transcriptAt: performance.now() };
         scheduleVoiceResponse(json.transcript);
       }
       break;
@@ -1535,13 +1587,18 @@ const TUNING_STORAGE_KEY = "voiceChat.tuning";
 // specifically yet -- headphones structurally avoid the acoustic-echo class of bug
 // regardless of whether AEC works, so a clean headphone result doesn't by itself confirm
 // the AEC fix helped over a real speaker.
-const TUNING_DEFAULTS = { threshold: 0.6, silenceMs: 900, fadeMs: 15, prebufferMs: 150 };
+// responseDebounceMs 500 (2026-08-28): moved in from the old standalone
+// RESPONSE_DEBOUNCE_MS constant -- see scheduleVoiceResponse's history comment for why
+// it exists. Unlike the other four, it's read fresh on every turn (not just at session
+// start), so changing it applies immediately to an in-progress conversation.
+const TUNING_DEFAULTS = { threshold: 0.6, silenceMs: 900, fadeMs: 15, prebufferMs: 150, responseDebounceMs: 500 };
 
 // Explanation text for the "?" tip buttons next to each field above -- threshold/
 // silenceMs wording mirrors VoiceChat/Settings/SettingsView.swift's SettingsTip enum
 // so both platforms explain the shared server-side params the same way; fadeMs/
-// prebufferMs are web-only (no iOS equivalent -- see pcm-player-worklet.js's history
-// comments for why AVAudioPlayerNode doesn't need them).
+// prebufferMs/responseDebounceMs are web-only (no iOS equivalent -- see
+// pcm-player-worklet.js's history comments for fadeMs/prebufferMs; responseDebounceMs
+// has no iOS port yet, see scheduleVoiceResponse's comment).
 const TUNING_TIPS = {
   threshold:
     "服务端判断“用户正在说话”的灵敏度，范围 0–1。数值越低，越容易把小声音也当成“有人在说话”（更容易打断 AI，但环境噪音也更容易被误判成插话）；数值越高，需要更明显的声音才会被判定为说话（不容易被打断，但小声说话可能被漏判）。推荐范围 0.5–0.6。",
@@ -1551,6 +1608,8 @@ const TUNING_TIPS = {
     "播放缓冲区在“有声音”和“没声音”之间切换时的淡入淡出时长（毫秒），用来消除生硬跳变产生的“咔哒”声。太短起不到消音效果，太长会让声音听起来发糊。推荐范围 10–20ms。",
   prebufferMs:
     "开始/恢复播放前，先攒够多少毫秒的数据再出声，用来防止网络抖动导致缓冲区反复跑空（表现为“沙哑”“毛躁”的声音质感）。太小起不到防抖作用，太大会让语音播放的启动延迟变得明显。推荐范围 80–150ms。",
+  responseDebounceMs:
+    "收到一句转写结果后，先等这么久（毫秒）确认用户没有紧接着继续说，才真正触发 AI 回复——用来防止一句话被服务端切成两段、AI 回答了一半又被自己打断。数值越小，回复越快，但换气停顿容易被当成两句话分别触发两次回复；数值越大，越不容易误判，但每一轮都会多等这么久。这一项改动会立即生效，不用重新开始会话。推荐范围 200–500ms。",
 };
 
 function loadTuning() {
@@ -1570,12 +1629,14 @@ const tuneThreshold = document.getElementById("tuneThreshold");
 const tuneSilenceMs = document.getElementById("tuneSilenceMs");
 const tuneFadeMs = document.getElementById("tuneFadeMs");
 const tunePrebufferMs = document.getElementById("tunePrebufferMs");
+const tuneResponseDebounceMs = document.getElementById("tuneResponseDebounceMs");
 
 function renderTuningInputs() {
   tuneThreshold.value = tuning.threshold;
   tuneSilenceMs.value = tuning.silenceMs;
   tuneFadeMs.value = tuning.fadeMs;
   tunePrebufferMs.value = tuning.prebufferMs;
+  tuneResponseDebounceMs.value = tuning.responseDebounceMs;
 }
 
 function saveTuning() {
@@ -1609,6 +1670,10 @@ tuneFadeMs.addEventListener("change", () => {
 tunePrebufferMs.addEventListener("change", () => {
   const v = parseInt(tunePrebufferMs.value, 10);
   if (!Number.isNaN(v)) { tuning.prebufferMs = v; saveTuning(); }
+});
+tuneResponseDebounceMs.addEventListener("change", () => {
+  const v = parseInt(tuneResponseDebounceMs.value, 10);
+  if (!Number.isNaN(v)) { tuning.responseDebounceMs = v; saveTuning(); }
 });
 
 document.getElementById("tuningReset").addEventListener("click", () => {
