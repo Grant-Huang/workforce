@@ -6,6 +6,8 @@
 
 网页 demo 的完整说明（怎么跑起来、架构、功能设计、实测记录）见 [`web-demo/README.md`](web-demo/README.md)。
 
+**LiveKit + Pipecat 对比方案**（模块化 STT→LLM→TTS，WebRTC 传输）见 [`web-demo/pipecat-livekit/README.md`](web-demo/pipecat-livekit/README.md) 与 [`docs/pipecat-livekit-comparison.md`](docs/pipecat-livekit-comparison.md)。
+
 ## 相关文档
 
 - [`docs/app-design.md`](docs/app-design.md) — 完整功能设计（三种交互模式、口述转文字、回复长度策略等）
