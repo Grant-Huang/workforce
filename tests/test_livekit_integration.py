@@ -1,4 +1,4 @@
-"""End-to-end wiring check against a real LiveKit server.
+"""End-to-end checks against a real LiveKit server.
 
 Covers the parts that cannot be faked in-process: the bot's token grants, joining a
 room, publishing its audio track, receiving a participant's audio, and shutting down
@@ -7,12 +7,19 @@ when that participant leaves. Runs in mock mode, so no DashScope key is involved
 Skipped unless a LiveKit server is reachable at LIVEKIT_URL. Start one with:
 
     pipecat_demo/scripts/run_livekit_dev.sh
+
+The second test additionally needs real speech to drive the VAD, which is too big to
+keep in the repo -- point `PIPECAT_TEST_SPEECH_WAV` at a 16-bit mono recording of
+someone talking, ideally with a few seconds of silence at the end so the bot's answer
+isn't barged in on. It is skipped without one.
 """
 import asyncio
 import contextlib
+import os
 import secrets
 import socket
 import sys
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -20,6 +27,7 @@ from livekit import rtc
 
 from pipecat_demo import config
 from pipecat_demo.livekit_token import BOT_IDENTITY, generate_user_token
+from pipecat_demo.scripts.drive_session import drive_session
 
 BOT_JOIN_TIMEOUT = 45.0
 SAMPLE_RATE = 16000
@@ -113,3 +121,48 @@ async def test_bot_joins_publishes_audio_and_exits_with_the_participant():
         pytest.fail("bot did not exit after the participant left")
 
     assert process.returncode == 0
+
+
+SPEECH_WAV = os.environ.get("PIPECAT_TEST_SPEECH_WAV", "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not SPEECH_WAV or not Path(SPEECH_WAV).exists(),
+    reason="set PIPECAT_TEST_SPEECH_WAV to a 16-bit mono speech recording",
+)
+async def test_real_speech_drives_a_complete_turn():
+    """Speech in, reply out, one timing report per turn -- over real WebRTC.
+
+    This is the only test where the VAD, the turn strategy and the transport all run on
+    real audio at real speed. It is also the regression test for the timing reports
+    being overwritten by empty ones: speech frames are broadcast, so a turn used to
+    produce one real report followed by a dozen blank ones.
+    """
+    events = await drive_session(
+        wav_path=Path(SPEECH_WAV),
+        duration=35.0,
+        mock=True,
+        log_path=Path("/tmp/pipecat_drive_session.log"),
+    )
+
+    kinds = [e.get("type") for e in events]
+    assert "ready" in kinds
+    assert "user" in kinds, "VAD/turn-taking never produced a user turn"
+    assert "assistant" in kinds, "the turn never reached a reply"
+
+    timings = [e for e in events if e.get("type") == "timing"]
+    assert timings, "no per-turn timing was reported"
+    assert all(t["total_ms"] is not None for t in timings), (
+        f"empty timing reports leaked through: {timings}"
+    )
+
+    complete = timings[0]
+    for key in (
+        "vad_to_transcript_ms",
+        "transcript_to_turn_end_ms",
+        "turn_end_to_llm_ms",
+        "llm_to_tts_audio_ms",
+        "tts_audio_to_playback_ms",
+    ):
+        assert complete[key] is not None, key

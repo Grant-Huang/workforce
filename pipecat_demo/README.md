@@ -96,7 +96,19 @@ python -m pytest tests/ -q
 - `test_memory.py`：分词/打分与 `memory.js` 对齐；AgentNexus 部分直接跑 `web-demo/agentnexus_mock.py` 本体。
 - `test_processors.py`：记忆注入的位置与替换语义、每轮耗时分解。
 - `test_bot_pipeline.py`：从"有了转写"到"出音频"整条会话链路（模拟服务）。
-- `test_livekit_integration.py`：真实 LiveKit 服务器上跑真实 bot 进程（模拟模式）——加入房间、发布音轨、参与者离开后进程正常退出。没起 LiveKit 时自动跳过。
+- `test_livekit_integration.py`：真实 LiveKit 服务器上跑真实 bot 进程（模拟模式）——加入房间、发布音轨、参与者离开后进程正常退出。没起 LiveKit 时自动跳过。其中还有一个用真人语音驱动完整轮次的测试，需要你提供一段 16 位单声道的录音：
+
+```bash
+PIPECAT_TEST_SPEECH_WAV=/path/to/speech.wav python -m pytest tests/test_livekit_integration.py -q
+```
+
+### 不开浏览器跑一轮
+
+```bash
+python -m pipecat_demo.scripts.drive_session --wav question.wav --mock --duration 40
+```
+
+拿一个 wav 当麦克风推进房间，把 bot 发回来的事件（转写、回复、记忆命中、每轮耗时）按 JSON 打到标准输出。想看真实云端链路的延迟数字就去掉 `--mock`。录音里最好在说完后留几秒静音，否则每轮都会被"用户还在说话"打断——那是打断逻辑在正常工作，不是故障。
 
 ## 目录
 
