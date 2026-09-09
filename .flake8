@@ -1,0 +1,8 @@
+[flake8]
+max-line-length = 100
+extend-exclude = .venv,.venv-pipecat,__pycache__,node_modules
+# prompts.py holds the system prompt verbatim, byte-identical to the copy in
+# web-demo/static/app.js. Reflowing it to satisfy the line limit would change the text
+# the model sees and break that parity.
+per-file-ignores =
+    pipecat_demo/prompts.py:E501

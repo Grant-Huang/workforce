@@ -18,3 +18,7 @@ DerivedData/
 __pycache__/
 *.pyc
 .venv/
+
+## Pipecat demo
+pipecat_demo/web/vendor/
+.venv-pipecat/
