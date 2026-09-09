@@ -6,10 +6,13 @@
 
 网页 demo 的完整说明（怎么跑起来、架构、功能设计、实测记录）见 [`web-demo/README.md`](web-demo/README.md)。
 
+另外还有一条**对照链路** [`pipecat_demo/`](pipecat_demo/README.md)：同样的对话，改用 **LiveKit（WebRTC 传输）+ Pipecat（Paraformer 识别 → Qwen 文本模型 → CosyVoice 合成）** 的级联架构实现，和 `web-demo/` 共用同一个账号、同一份提示词、同一个记忆后端，用来对比延迟、打断、成本、可控性、记忆注入和回声消除。逐项对比见 [`docs/livekit-pipecat-comparison.md`](docs/livekit-pipecat-comparison.md)。
+
 ## 相关文档
 
 - [`docs/app-design.md`](docs/app-design.md) — 完整功能设计（三种交互模式、口述转文字、回复长度策略等）
 - [`docs/qwen-realtime-voice-setup.md`](docs/qwen-realtime-voice-setup.md) — Qwen Realtime API 踩过的坑（域名选择、模型/音色选型）
+- [`docs/livekit-pipecat-comparison.md`](docs/livekit-pipecat-comparison.md) — 端到端语音模型 vs LiveKit+Pipecat 级联管线的逐项对比
 - [`docs/agentnexus-memory-integration-proposal.md`](docs/agentnexus-memory-integration-proposal.md) — 给智枢（AgentNexus）团队的记忆体系集成建议
 - [`docs/roadmap-todo.md`](docs/roadmap-todo.md) — 开发讨论纪要/已完成事项记录（其中部分历史条目涉及已移除的 iOS 端，作为决策背景保留，不代表当前代码状态）
 - [`docs/testing-deployment.md`](docs/testing-deployment.md) — 部署/测试相关笔记（同样有历史 iOS 内容）

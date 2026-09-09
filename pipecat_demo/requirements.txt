@@ -1,0 +1,8 @@
+# Pinned to the versions this pipeline was written and tested against (2026-09-08).
+# pipecat's service APIs move fast enough that a floor-only constraint isn't safe.
+pipecat-ai[livekit,silero,openai]==1.8.1
+aiohttp>=3.9
+websockets>=12.0
+python-dotenv>=1.0
+pytest>=8.0
+pytest-asyncio>=0.24

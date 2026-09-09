@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LiveKit + Pipecat 级联管线（对比 Demo）</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="title">
+        <h1>LiveKit + Pipecat 级联管线</h1>
+        <p class="subtitle" id="pipelineSummary">加载配置中…</p>
+      </div>
+      <div class="status" id="status">未连接</div>
+    </header>
+
+    <main class="layout">
+      <section class="chat" id="chat">
+        <div class="empty" id="empty">
+          <p>点下面的按钮开始语音对话。</p>
+          <p class="hint">
+            这一条链路是「WebRTC 传输 + 本地 VAD + ASR + 文本大模型 + TTS」；
+            旁边那条（web-demo，端口 8765）是 Qwen-Omni-Realtime 端到端语音模型。
+            两边用同一份提示词、同一个记忆后端，方便直接对比。
+          </p>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <h2>每轮耗时分解</h2>
+        <ul class="timing" id="timing">
+          <li><span>停止说话 → 转写</span><b data-k="vad_to_transcript_ms">—</b></li>
+          <li><span>转写 → 回合结束（防抖）</span><b data-k="transcript_to_turn_end_ms">—</b></li>
+          <li><span>回合结束 → LLM 首字</span><b data-k="turn_end_to_llm_ms">—</b></li>
+          <li><span>LLM 首字 → TTS 首音</span><b data-k="llm_to_tts_audio_ms">—</b></li>
+          <li><span>TTS 首音 → 开始播放</span><b data-k="tts_audio_to_playback_ms">—</b></li>
+          <li class="total"><span>总计（可感知延迟）</span><b data-k="total_ms">—</b></li>
+        </ul>
+        <p class="note">
+          端到端那条链路只能测到「转写到达」之后的部分，静音判定到转写之间发生在模型内部，
+          客户端测不到；这条链路每一段都在本地，所以每段都有数。「防抖」那一段是故意等的
+          （默认 0.5 秒，留给用户接着往下说），不是模型慢，所以单列出来。
+        </p>
+
+        <h2>本轮记忆命中</h2>
+        <div class="memory" id="memory">—</div>
+      </aside>
+    </main>
+
+    <footer class="footer">
+      <button id="toggle" class="mic" aria-label="开始或结束对话">开始对话</button>
+      <span class="error" id="error"></span>
+    </footer>
+
+    <script>
+      // Prefer a vendored copy (scripts/fetch_client_sdk.sh) so the demo works offline;
+      // fall back to the CDN when it hasn't been fetched.
+      window.loadLiveKitSdk = function () {
+        return new Promise((resolve, reject) => {
+          const local = document.createElement("script");
+          local.src = "/static/vendor/livekit-client.umd.min.js";
+          local.onload = resolve;
+          local.onerror = () => {
+            const cdn = document.createElement("script");
+            cdn.src = "https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js";
+            cdn.onload = resolve;
+            cdn.onerror = reject;
+            document.head.appendChild(cdn);
+          };
+          document.head.appendChild(local);
+        });
+      };
+    </script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
