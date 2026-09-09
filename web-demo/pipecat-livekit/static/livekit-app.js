@@ -5,10 +5,15 @@ const emptyEl = document.getElementById("empty");
 const connectBtn = document.getElementById("connectBtn");
 const disconnectBtn = document.getElementById("disconnectBtn");
 
+const BOT_IDENTITY = "Pipecat Agent";
+const BOT_WAIT_MS = 30000;
+const BOT_POLL_MS = 1000;
+
 let room = null;
 let config = null;
-let connectedAt = null;
 let assistantBubble = null;
+let botWaitTimer = null;
+let botPollTimer = null;
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -18,8 +23,27 @@ function setMetrics(text) {
   metricsEl.textContent = text || "";
 }
 
+function clearBotTimers() {
+  if (botWaitTimer) {
+    clearTimeout(botWaitTimer);
+    botWaitTimer = null;
+  }
+  if (botPollTimer) {
+    clearInterval(botPollTimer);
+    botPollTimer = null;
+  }
+}
+
 function hideEmpty() {
   emptyEl.style.display = "none";
+}
+
+function findBotParticipant() {
+  if (!room) return null;
+  for (const participant of room.remoteParticipants.values()) {
+    if (participant.identity === BOT_IDENTITY) return participant;
+  }
+  return null;
 }
 
 function appendBubble(role, text, { streaming = false } = {}) {
@@ -58,15 +82,68 @@ function handleDataMessage(payload) {
   }
 }
 
+function onBotDetected(participant) {
+  clearBotTimers();
+  setMetrics(`Bot 已加入 (${participant.identity})，等待欢迎语…`);
+}
+
+async function pollBotStatus() {
+  try {
+    const resp = await fetch("/api/bot/status");
+    const body = await resp.json();
+    const data = body.data || {};
+    if (data.status === "error" || (data.status === "stopped" && data.error)) {
+      setMetrics(`Bot 异常：${data.error || data.message || "已停止"}`);
+    }
+  } catch (_) {
+    // ignore polling errors
+  }
+}
+
+function startWaitingForBot() {
+  clearBotTimers();
+  setMetrics("正在启动 Pipecat bot 并等待加入房间…");
+
+  if (findBotParticipant()) {
+    onBotDetected(findBotParticipant());
+    return;
+  }
+
+  botPollTimer = setInterval(() => {
+    const bot = findBotParticipant();
+    if (bot) {
+      onBotDetected(bot);
+      return;
+    }
+    pollBotStatus();
+  }, BOT_POLL_MS);
+
+  botWaitTimer = setTimeout(async () => {
+    if (findBotParticipant()) return;
+    clearBotTimers();
+    let hint = "请确认：1) LiveKit server 已启动；2) .env 里 QWEN_API_KEY 已配置；3) 查看 server.py 终端日志";
+    try {
+      const resp = await fetch("/api/bot/status");
+      const body = await resp.json();
+      const err = body.data?.error;
+      if (err) hint = err;
+    } catch (_) {}
+    setMetrics(`超时：Bot 未加入房间。${hint}`);
+  }, BOT_WAIT_MS);
+}
+
 async function loadConfig() {
   const resp = await fetch("/api/config");
   const body = await resp.json();
   config = body.data;
+  if (!config.hasQwenKey) {
+    setMetrics("警告：QWEN_API_KEY 未配置，连接时会失败");
+  }
 }
 
 async function connect() {
   connectBtn.disabled = true;
-  setStatus("正在获取 token…");
+  setStatus("正在启动 bot 并获取 token…");
 
   try {
     if (!config) await loadConfig();
@@ -78,7 +155,11 @@ async function connect() {
       throw new Error(tokenBody.message || "token 获取失败");
     }
 
-    const { token, url, room: joinedRoom } = tokenBody.data;
+    const { token, url, room: joinedRoom, bot } = tokenBody.data;
+    if (bot?.status === "starting") {
+      setMetrics(`Bot 正在启动 (pid ${bot.pid})…`);
+    }
+
     setStatus(`正在连接 LiveKit 房间 ${joinedRoom}…`);
 
     room = new LivekitClient.Room({
@@ -86,14 +167,8 @@ async function connect() {
       dynacast: true,
     });
 
-    room.on(LivekitClient.RoomEvent.Connected, () => {
-      connectedAt = Date.now();
-      setStatus(`已连接 · 房间 ${joinedRoom}`);
-      setMetrics("等待 Pipecat bot 加入并开始说话…");
-      disconnectBtn.disabled = false;
-    });
-
     room.on(LivekitClient.RoomEvent.Disconnected, () => {
+      clearBotTimers();
       setStatus("已断开");
       setMetrics("");
       connectBtn.disabled = false;
@@ -103,7 +178,11 @@ async function connect() {
     });
 
     room.on(LivekitClient.RoomEvent.ParticipantConnected, (participant) => {
-      setMetrics(`Bot 已加入: ${participant.identity}`);
+      if (participant.identity === BOT_IDENTITY) {
+        onBotDetected(participant);
+      } else {
+        setMetrics(`参与者加入: ${participant.identity}`);
+      }
     });
 
     room.on(LivekitClient.RoomEvent.DataReceived, (payload) => {
@@ -116,15 +195,20 @@ async function connect() {
         const audioEl = track.attach();
         audioEl.autoplay = true;
         document.body.appendChild(audioEl);
-        setMetrics(`正在播放 ${participant.identity} 的音频`);
+        if (participant.identity === BOT_IDENTITY) {
+          setMetrics("Bot 音频已连接，可以开始说话");
+        }
       }
     });
 
     await room.connect(url, token);
     await room.localParticipant.setMicrophoneEnabled(true);
-    setStatus(`已连接 · 麦克风已开启`);
+    setStatus(`已连接 · 麦克风已开启 · 房间 ${joinedRoom}`);
+    disconnectBtn.disabled = false;
+    startWaitingForBot();
   } catch (err) {
     console.error(err);
+    clearBotTimers();
     setStatus(`连接失败: ${err.message}`);
     connectBtn.disabled = false;
     disconnectBtn.disabled = true;
@@ -136,6 +220,7 @@ async function connect() {
 }
 
 async function disconnect() {
+  clearBotTimers();
   if (room) {
     await room.disconnect();
   }

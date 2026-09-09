@@ -14,38 +14,32 @@
 1. **Qwen API Key** — 与现有 demo 共用仓库根目录 `.env` 里的 `QWEN_API_KEY`
 2. **LiveKit Server** — 本地开发可用 dev 模式（默认凭据见下方）
 
-## 快速启动（3 个终端）
+## 快速启动（2 个终端）
 
 ### 终端 1：LiveKit Server
 
 ```bash
 docker run --rm -p 7880:7880 -p 7881:7881 -p 7882:7882/udp \
   livekit/livekit-server --dev
+# 或 ./start-livekit.sh
 ```
 
-Dev 模式默认凭据（已在 `.env.example` 中）：
-
-- `LIVEKIT_URL=ws://127.0.0.1:7880`
-- `LIVEKIT_API_KEY=devkey`
-- `LIVEKIT_API_SECRET=secret`
-
-### 终端 2：Pipecat Bot
+### 终端 2：对比 UI（会自动启动 Pipecat bot）
 
 ```bash
 cd web-demo/pipecat-livekit
 pip install -r requirements.txt
-python bot.py --room voicechat-compare
-```
-
-### 终端 3：对比 UI
-
-```bash
-cd web-demo/pipecat-livekit
 python server.py
 # 浏览器打开 http://127.0.0.1:8766/
 ```
 
-点击「连接并开始」，允许麦克风。Bot 加入后会播放欢迎语。
+点击「连接并开始」后，`server.py` 会**自动拉起 `bot.py` 子进程**加入同一房间，无需再开第三个终端。
+
+若需手动调试 bot，仍可单独运行：
+
+```bash
+python bot.py --room voicechat-compare
+```
 
 ## 环境变量
 

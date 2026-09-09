@@ -1,12 +1,14 @@
 """Token + static server for the LiveKit comparison UI.
 
-Serves the browser page and issues LiveKit participant tokens.
-The Pipecat bot (bot.py) must be running separately and join the same room.
+Serves the browser page, issues LiveKit participant tokens, and auto-starts
+the Pipecat bot subprocess when the user connects.
 
 Run:
   cd web-demo/pipecat-livekit
   python server.py
   # -> http://127.0.0.1:8766
+
+Also requires LiveKit server (see README / start-livekit.sh).
 """
 
 from __future__ import annotations
@@ -23,6 +25,8 @@ try:
     from pipecat.runner.livekit import generate_token
 except ImportError as exc:
     raise SystemExit("Install dependencies: pip install -r requirements.txt") from exc
+
+from bot_manager import ensure_started, get_status, stop as stop_bot
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR.parent.parent / ".env")
@@ -65,6 +69,14 @@ async def livekit_token(request):
 
     room = request.query.get("room") or DEFAULT_ROOM
     participant = request.query.get("participant") or f"user-{uuid.uuid4().hex[:8]}"
+
+    bot_status = ensure_started(room)
+    if bot_status.get("status") == "error":
+        return web.json_response(
+            {"status": "error", "message": bot_status.get("message", "bot 启动失败")},
+            status=503,
+        )
+
     token = generate_token(room, participant, LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
 
     return web.json_response(
@@ -75,19 +87,30 @@ async def livekit_token(request):
                 "url": LIVEKIT_URL,
                 "room": room,
                 "participant": participant,
+                "bot": bot_status,
             },
         }
     )
 
 
+async def bot_status(_request):
+    return web.json_response({"status": "success", "data": get_status()})
+
+
+async def on_shutdown(_app):
+    stop_bot()
+
+
 app = web.Application()
+app.on_shutdown.append(on_shutdown)
 app.router.add_get("/", index)
 app.router.add_get("/api/config", config)
+app.router.add_get("/api/bot/status", bot_status)
 app.router.add_get("/api/livekit/token", livekit_token)
 app.router.add_static("/static/", BASE_DIR / "static")
 
 if __name__ == "__main__":
     print(f"LiveKit comparison UI: http://{HOST}:{PORT}/")
     print(f"LiveKit URL: {LIVEKIT_URL}  default room: {DEFAULT_ROOM}")
-    print("Start the bot in another terminal: python bot.py --room", DEFAULT_ROOM)
+    print("Bot 会在浏览器连接时自动启动（需 QWEN_API_KEY）")
     web.run_app(app, host=HOST, port=PORT)
