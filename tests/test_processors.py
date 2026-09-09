@@ -8,6 +8,7 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
     TTSAudioRawFrame,
     UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.observers.base_observer import FramePushed
@@ -135,6 +136,17 @@ class _Dummy(FrameProcessor):
     pass
 
 
+# The debounce sits in its own segment on purpose: rolled into the LLM segment it would
+# look like the model took half a second.
+SEGMENTS = (
+    "vad_to_transcript_ms",
+    "transcript_to_turn_end_ms",
+    "turn_end_to_llm_ms",
+    "llm_to_tts_audio_ms",
+    "tts_audio_to_playback_ms",
+)
+
+
 async def push(observer: TurnTimingObserver, frame) -> None:
     processor = _Dummy()
     await observer.on_push_frame(
@@ -159,6 +171,8 @@ async def test_turn_timing_breakdown_covers_every_hop():
     await asyncio.sleep(0.02)
     await push(observer, TranscriptionFrame("下午开会几点", "user", "now"))
     await asyncio.sleep(0.02)
+    await push(observer, UserStoppedSpeakingFrame())
+    await asyncio.sleep(0.02)
     await push(observer, LLMTextFrame("下午"))
     await asyncio.sleep(0.02)
     await push(observer, TTSAudioRawFrame(b"\x00\x00", 24000, 1))
@@ -167,27 +181,35 @@ async def test_turn_timing_breakdown_covers_every_hop():
 
     assert len(reported) == 1
     breakdown = reported[0]
-    for key in (
-        "vad_to_transcript_ms",
-        "transcript_to_llm_ms",
-        "llm_to_tts_audio_ms",
-        "tts_audio_to_playback_ms",
-        "total_ms",
-    ):
+    for key in SEGMENTS + ("total_ms",):
         assert breakdown[key] is not None, key
         assert breakdown[key] >= 0
 
-    segments = sum(
-        breakdown[key]
-        for key in (
-            "vad_to_transcript_ms",
-            "transcript_to_llm_ms",
-            "llm_to_tts_audio_ms",
-            "tts_audio_to_playback_ms",
-        )
-    )
+    segments = sum(breakdown[key] for key in SEGMENTS)
     # Rounding to whole milliseconds can shift the sum by a few ms either way.
     assert abs(segments - breakdown["total_ms"]) <= 4
+
+
+async def test_broadcast_copies_do_not_produce_empty_reports():
+    """One turn must report once, even though speech frames arrive once per processor.
+
+    `BotStartedSpeakingFrame` is broadcast, so each processor gets a *distinct* object;
+    without a guard the copies each fire a report with every segment empty, and in the
+    UI those overwrite the real numbers with dashes.
+    """
+    reported: list[dict] = []
+    observer = TurnTimingObserver(on_turn=lambda b: _collect(reported, b))
+
+    await push(observer, UserStartedSpeakingFrame())
+    await push(observer, VADUserStoppedSpeakingFrame(stop_secs=0.9))
+    await push(observer, TranscriptionFrame("测试", "user", "now"))
+    await push(observer, LLMTextFrame("测"))
+    await push(observer, TTSAudioRawFrame(b"\x00\x00", 24000, 1))
+    for _ in range(5):
+        await push(observer, BotStartedSpeakingFrame())
+
+    assert len(reported) == 1
+    assert reported[0]["total_ms"] is not None
 
 
 async def test_repeated_frames_do_not_reset_marks():

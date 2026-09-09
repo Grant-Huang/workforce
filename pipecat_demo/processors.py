@@ -18,6 +18,7 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
     TTSAudioRawFrame,
     UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
@@ -151,7 +152,10 @@ class TurnTimingObserver(BaseObserver):
 
     * 停止说话 → 最终转写: local Silero VAD closing the turn, then Paraformer's final
       sentence result.
-    * 转写 → LLM 首字: the chat-completions call's time to first token.
+    * 转写 → 回合判定结束: the deliberate wait for the user to maybe say more
+      (`RESPONSE_DEBOUNCE_SECS`). Kept separate because it is a policy choice, not a
+      cost: folded into the next segment it would read as "the LLM took 500ms".
+    * 回合结束 → LLM 首字: the chat-completions call's time to first token.
     * LLM 首字 → TTS 首个音频: CosyVoice's time to first byte.
     * TTS 首个音频 → 开始播放: transport/WebRTC queueing before the user hears it.
 
@@ -195,11 +199,21 @@ class TurnTimingObserver(BaseObserver):
             self._mark(frame, "speech_stopped")
         elif isinstance(frame, TranscriptionFrame):
             self._mark(frame, "transcript")
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            self._mark(frame, "turn_end")
         elif isinstance(frame, LLMTextFrame):
             self._mark(frame, "llm_first_token")
         elif isinstance(frame, TTSAudioRawFrame):
             self._mark(frame, "tts_first_audio")
         elif isinstance(frame, BotStartedSpeakingFrame):
+            # Speech frames are *broadcast*, so every processor receives its own
+            # instance and the frame id can't identify duplicates. The turn's marks are
+            # cleared once it has been reported, which is what makes the copies -- and
+            # any bot speech that didn't follow a user turn -- silent here. Without this
+            # guard one turn produces a dozen empty reports that overwrite the real one
+            # in the UI.
+            if "speech_stopped" not in self._marks:
+                return
             self._mark(frame, "bot_started_speaking")
             await self._report()
         elif isinstance(frame, InterruptionFrame):
@@ -218,16 +232,19 @@ class TurnTimingObserver(BaseObserver):
     async def _report(self):
         breakdown = {
             "vad_to_transcript_ms": self._segment("speech_stopped", "transcript"),
-            "transcript_to_llm_ms": self._segment("transcript", "llm_first_token"),
+            "transcript_to_turn_end_ms": self._segment("transcript", "turn_end"),
+            "turn_end_to_llm_ms": self._segment("turn_end", "llm_first_token"),
             "llm_to_tts_audio_ms": self._segment("llm_first_token", "tts_first_audio"),
             "tts_audio_to_playback_ms": self._segment("tts_first_audio", "bot_started_speaking"),
             "total_ms": self._segment("speech_stopped", "bot_started_speaking"),
         }
         logger.info(
-            "[turn timing] 停止说话→转写: {vad}ms | 转写→LLM首字: {llm}ms | "
-            "LLM首字→TTS首音: {tts}ms | TTS首音→开始播放: {play}ms | 总计: {total}ms".format(
+            "[turn timing] 停止说话→转写: {vad}ms | 转写→回合结束(防抖): {debounce}ms | "
+            "回合结束→LLM首字: {llm}ms | LLM首字→TTS首音: {tts}ms | "
+            "TTS首音→开始播放: {play}ms | 总计: {total}ms".format(
                 vad=breakdown["vad_to_transcript_ms"],
-                llm=breakdown["transcript_to_llm_ms"],
+                debounce=breakdown["transcript_to_turn_end_ms"],
+                llm=breakdown["turn_end_to_llm_ms"],
                 tts=breakdown["llm_to_tts_audio_ms"],
                 play=breakdown["tts_audio_to_playback_ms"],
                 total=breakdown["total_ms"],

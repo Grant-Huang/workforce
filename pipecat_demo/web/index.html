@@ -31,14 +31,16 @@
         <h2>每轮耗时分解</h2>
         <ul class="timing" id="timing">
           <li><span>停止说话 → 转写</span><b data-k="vad_to_transcript_ms">—</b></li>
-          <li><span>转写 → LLM 首字</span><b data-k="transcript_to_llm_ms">—</b></li>
+          <li><span>转写 → 回合结束（防抖）</span><b data-k="transcript_to_turn_end_ms">—</b></li>
+          <li><span>回合结束 → LLM 首字</span><b data-k="turn_end_to_llm_ms">—</b></li>
           <li><span>LLM 首字 → TTS 首音</span><b data-k="llm_to_tts_audio_ms">—</b></li>
           <li><span>TTS 首音 → 开始播放</span><b data-k="tts_audio_to_playback_ms">—</b></li>
           <li class="total"><span>总计（可感知延迟）</span><b data-k="total_ms">—</b></li>
         </ul>
         <p class="note">
           端到端那条链路只能测到「转写到达」之后的部分，静音判定到转写之间发生在模型内部，
-          客户端测不到；这条链路每一段都在本地，所以四段都有数。
+          客户端测不到；这条链路每一段都在本地，所以每段都有数。「防抖」那一段是故意等的
+          （默认 0.5 秒，留给用户接着往下说），不是模型慢，所以单列出来。
         </p>
 
         <h2>本轮记忆命中</h2>

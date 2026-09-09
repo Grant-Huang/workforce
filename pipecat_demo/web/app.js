@@ -20,6 +20,7 @@ const summaryEl = document.getElementById("pipelineSummary");
 let room = null;
 let session = null;
 let connecting = false;
+let assistantBubble = null;
 const decoder = new TextDecoder();
 
 async function loadConfig() {
@@ -57,6 +58,31 @@ function addBubble(role, text, interrupted) {
   el.textContent = text;
   chatEl.appendChild(el);
   chatEl.scrollTop = chatEl.scrollHeight;
+  return el;
+}
+
+// The bot's reply is shown sentence by sentence as it is spoken, not in one lump when
+// the turn ends -- otherwise the text lags the audio by the length of the answer.
+// The sentences come from pipecat's own RTVI events, which the pipeline already
+// publishes on this data channel; the `assistant` event below then replaces the bubble
+// with the aggregated text and marks it if the user barged in.
+function appendAssistantText(text) {
+  if (!assistantBubble) {
+    assistantBubble = addBubble("assistant", text);
+    return;
+  }
+  assistantBubble.textContent += text;
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function finalizeAssistantBubble(text, interrupted) {
+  if (!assistantBubble) {
+    assistantBubble = addBubble("assistant", text, interrupted);
+  } else {
+    assistantBubble.textContent = text;
+    if (interrupted) assistantBubble.classList.add("interrupted");
+  }
+  assistantBubble = null;
 }
 
 function renderTiming(payload) {
@@ -75,15 +101,21 @@ function renderMemory(payload) {
 }
 
 function handleBotEvent(payload) {
+  if (payload.label === "rtvi-ai") {
+    if (payload.type === "bot-tts-text") appendAssistantText(payload.data.text);
+    return;
+  }
+
   switch (payload.type) {
     case "ready":
       setStatus(`已连接（记忆 ${payload.memory_entries} 条）`);
       break;
     case "user":
+      assistantBubble = null;
       addBubble("user", payload.text);
       break;
     case "assistant":
-      addBubble("assistant", payload.text, payload.interrupted);
+      finalizeAssistantBubble(payload.text, payload.interrupted);
       break;
     case "timing":
       renderTiming(payload);
