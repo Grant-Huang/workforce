@@ -12,22 +12,35 @@
 ## 前置条件
 
 1. **Qwen API Key** — 与现有 demo 共用仓库根目录 `.env` 里的 `QWEN_API_KEY`
-2. **LiveKit Server** — 本地开发可用 dev 模式（默认凭据见下方）
+2. **LiveKit Server** — 本地已安装或 Docker dev 模式均可
+3. **Pipecat** — 通过本项目 `requirements.txt` 安装（若你全局已装 Pipecat，建议仍用 venv 隔离版本）
 
 ## 快速启动（2 个终端）
 
 ### 终端 1：LiveKit Server
 
+**方式 A — 本机已安装（推荐）**
+
+```bash
+livekit-server --dev --bind 127.0.0.1
+# 或
+./start-livekit.sh   # 自动检测 PATH 里的 livekit-server
+```
+
+**方式 B — Docker**
+
 ```bash
 docker run --rm -p 7880:7880 -p 7881:7881 -p 7882:7882/udp \
   livekit/livekit-server --dev
-# 或 ./start-livekit.sh
 ```
+
+Dev 模式凭据（与 `.env` 默认一致）：`devkey` / `secret`，URL：`ws://127.0.0.1:7880`
 
 ### 终端 2：对比 UI（会自动启动 Pipecat bot）
 
 ```bash
 cd web-demo/pipecat-livekit
+python3 -m venv .venv && source .venv/bin/activate   # 推荐，避免与全局 Pipecat 版本冲突
 pip install -r requirements.txt
 python server.py
 # 浏览器打开 http://127.0.0.1:8766/
@@ -35,10 +48,27 @@ python server.py
 
 点击「连接并开始」后，`server.py` 会**自动拉起 `bot.py` 子进程**加入同一房间，无需再开第三个终端。
 
-若需手动调试 bot，仍可单独运行：
+若需手动调试 bot（使用你已安装的 Pipecat 环境）：
 
 ```bash
+cd web-demo/pipecat-livekit
+source .venv/bin/activate   # 或你的 Pipecat 虚拟环境
+export LIVEKIT_URL=ws://127.0.0.1:7880
+export LIVEKIT_API_KEY=devkey
+export LIVEKIT_API_SECRET=secret
 python bot.py --room voicechat-compare
+```
+
+## 本机安装验证
+
+```bash
+# LiveKit
+livekit-server --version
+curl http://127.0.0.1:7880/          # 启动后应返回 OK
+
+# Pipecat（在项目 venv 内）
+python -c "import pipecat; print(pipecat.__version__)"
+python -c "from pipecat.transports.livekit.transport import LiveKitTransport; print('livekit extra ok')"
 ```
 
 ## 环境变量
