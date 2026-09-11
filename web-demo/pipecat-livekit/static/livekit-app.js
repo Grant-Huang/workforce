@@ -194,6 +194,7 @@ async function connect() {
       if (track.kind === LivekitClient.Track.Kind.Audio) {
         const audioEl = track.attach();
         audioEl.autoplay = true;
+        audioEl.dataset.lkAudio = "1";
         document.body.appendChild(audioEl);
         if (participant.identity === BOT_IDENTITY) {
           setMetrics("Bot 音频已连接，可以开始说话");
@@ -220,10 +221,24 @@ async function connect() {
 }
 
 async function disconnect() {
+  await disconnectAll();
+}
+
+async function disconnectAll() {
   clearBotTimers();
   if (room) {
+    try {
+      await room.localParticipant.setMicrophoneEnabled(false);
+    } catch (_) {
+      // ignore if already disconnected
+    }
     await room.disconnect();
+    room = null;
   }
+  document.querySelectorAll("audio[data-lk-audio]").forEach((el) => el.remove());
+  assistantBubble = null;
+  connectBtn.disabled = false;
+  disconnectBtn.disabled = true;
 }
 
 connectBtn.addEventListener("click", connect);
@@ -232,3 +247,12 @@ disconnectBtn.addEventListener("click", disconnect);
 loadConfig().catch((err) => {
   setStatus(`配置加载失败: ${err.message}`);
 });
+
+if (window.VoiceModeSwitcher) {
+  VoiceModeSwitcher.mountSwitcher(document.getElementById("modeSwitcher"), {
+    currentMode: "livekit",
+    onBeforeLeave: async () => {
+      await disconnectAll();
+    },
+  });
+}

@@ -101,12 +101,17 @@ async def on_shutdown(_app):
     stop_bot()
 
 
+async def shared_mode_switcher(_request):
+    return web.FileResponse(BASE_DIR.parent / "static" / "mode-switcher.js")
+
+
 app = web.Application()
 app.on_shutdown.append(on_shutdown)
 app.router.add_get("/", index)
 app.router.add_get("/api/config", config)
 app.router.add_get("/api/bot/status", bot_status)
 app.router.add_get("/api/livekit/token", livekit_token)
+app.router.add_get("/shared/mode-switcher.js", shared_mode_switcher)
 app.router.add_static("/static/", BASE_DIR / "static")
 
 if __name__ == "__main__":

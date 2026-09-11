@@ -970,6 +970,15 @@ async function start() {
   }
 }
 
+/** Tear down voice, text, and dictation sessions before leaving the page. */
+function stopAllSessions() {
+  stop();
+  stopTextSession();
+  if (dictationState !== DICTATION_STATE.IDLE) {
+    cancelDictation();
+  }
+}
+
 function stop(reason) {
   // A patch we're mid-wait on (updateInstructionsAndWait/sendSessionUpdateAndWait) can
   // no longer be acked once we're tearing the connection down — resolve it now instead
@@ -1711,6 +1720,15 @@ tuningPanel.addEventListener("click", (event) => {
 
 renderSuggestions();
 setState(STATE.IDLE);
+
+if (window.VoiceModeSwitcher) {
+  VoiceModeSwitcher.mountSwitcher(document.getElementById("modeSwitcher"), {
+    currentMode: "qwen",
+    onBeforeLeave: async () => {
+      stopAllSessions();
+    },
+  });
+}
 
 // Refresh the local memory cache when the tab regains focus, on top of the existing
 // pull-on-conversation-start -- covers "memory changed on another device/tab while this

@@ -58,13 +58,23 @@ Browser ──WebRTC──► LiveKit SFU ──WebRTC──► Pipecat Bot
 ## 对比实验步骤
 
 1. 同时启动两套服务（见 `web-demo/pipecat-livekit/README.md`）
-2. 用相同测试句（如「我周二有什么安排？」）分别测试
-3. 记录：
+2. 打开 **8765**（`http://127.0.0.1:8765/`）或 **8766**（`http://127.0.0.1:8766/`），用顶部 **pill 切换器**在两种方案间切换
+   - 切换前会自动断开当前会话（8765：`stopAllSessions`；8766：`disconnectAll`），避免并发占用 mic
+3. 用相同测试句（如「我周二有什么安排？」）分别测试
+4. 记录：
    - 连接建立时间
    - 说完 → 听到首包延迟
    - 打断是否灵敏、是否误触发
    - 多轮上下文是否稳定
-4. 打开浏览器开发者工具 Network / Console 观察错误
+5. 打开浏览器开发者工具 Network / Console 观察错误
+
+### 切换器验收
+
+| 操作 | 预期 |
+|------|------|
+| 8765 语音会话中 → 切到 LiveKit | mic 关闭、WebSocket 断开、8766 加载 |
+| 8766 LiveKit 连接中 → 切到 Qwen | room.disconnect、mic 关闭、8765 加载 |
+| 当前页 pill | 高亮且 disabled |
 
 ## 已知限制（Pipecat 方案）
 
