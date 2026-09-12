@@ -66,6 +66,13 @@ class LocalAgentConfig:
     system_instruction: str
     log_level: str
 
+    # Pipeline / LiveKit session keep-alive
+    pipeline_enable_heartbeats: bool
+    heartbeats_period_secs: float
+    heartbeats_monitor_secs: float
+    livekit_auto_reconnect: bool
+    livekit_reconnect_delay_secs: float
+
     @classmethod
     def from_env(cls) -> LocalAgentConfig:
         return cls(
@@ -78,9 +85,10 @@ class LocalAgentConfig:
             stt_model=_env("LOCAL_STT_MODEL", "iic/SenseVoiceSmall"),
             stt_device=_env("LOCAL_STT_DEVICE", "mps"),
             stt_language=_env("LOCAL_STT_LANGUAGE", "auto"),
-            llm_backend=_env("LOCAL_LLM_BACKEND", "llamacpp").lower(),
+            # Default ollama: separate OS process, avoids MPS contention with SenseVoice/TTS in Pipecat.
+            llm_backend=_env("LOCAL_LLM_BACKEND", "ollama").lower(),
             llm_model=_env("LOCAL_LLM_MODEL", "qwen2.5:7b"),
-            llm_base_url=_env("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8080/v1"),
+            llm_base_url=_env("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434/v1"),
             llm_api_key=_env("LOCAL_LLM_API_KEY", "local"),
             llm_temperature=float(_env("LOCAL_LLM_TEMPERATURE", "0.7")),
             llm_max_tokens=int(_env("LOCAL_LLM_MAX_TOKENS", "512")),
@@ -98,6 +106,11 @@ class LocalAgentConfig:
             dashscope_api_key=_env("QWEN_API_KEY") or _env("DASHSCOPE_API_KEY"),
             system_instruction=_env("LOCAL_SYSTEM_INSTRUCTION", DEFAULT_SYSTEM_INSTRUCTION),
             log_level=_env("LOG_LEVEL", "INFO"),
+            pipeline_enable_heartbeats=_env_bool("PIPELINE_ENABLE_HEARTBEATS", True),
+            heartbeats_period_secs=float(_env("PIPELINE_HEARTBEATS_PERIOD_SECS", "5")),
+            heartbeats_monitor_secs=float(_env("PIPELINE_HEARTBEATS_MONITOR_SECS", "30")),
+            livekit_auto_reconnect=_env_bool("LIVEKIT_AUTO_RECONNECT", True),
+            livekit_reconnect_delay_secs=float(_env("LIVEKIT_RECONNECT_DELAY_SECS", "5")),
         )
 
     def validate_livekit(self) -> None:
@@ -110,3 +123,33 @@ class LocalAgentConfig:
             )
         if not self.livekit_room:
             raise ValueError("LIVEKIT_ROOM_NAME is required.")
+
+    def validate_livekit_url_direct(self) -> None:
+        """LiveKit Cloud WSS must not be proxied through Cloudflare Tunnel."""
+        url = self.livekit_url.lower()
+        proxy_markers = (
+            "cloudflare",
+            "trycloudflare.com",
+            "cfargotunnel.com",
+            "yourdomain.com/chat",  # example anti-pattern only — real check below
+        )
+        if any(marker in url for marker in ("cloudflare", "trycloudflare.com", "cfargotunnel.com")):
+            raise ValueError(
+                "LIVEKIT_URL must be the native LiveKit Cloud endpoint "
+                "(wss://<project>.livekit.cloud). Do NOT route LiveKit signaling through Cloudflare Tunnel."
+            )
+        if "livekit.cloud" not in url and not url.startswith("ws://127.0.0.1"):
+            raise ValueError(
+                "LIVEKIT_URL should be wss://<your-project>.livekit.cloud for production. "
+                "Frontends and Mac agent must connect to LiveKit Cloud directly."
+            )
+
+    def warn_mps_layout(self) -> list[str]:
+        """Return warnings about in-process LLM competing with STT/TTS on MPS."""
+        notes: list[str] = []
+        if self.llm_backend in ("llamacpp", "local") and self.stt_device == "mps" and self.tts_device == "mps":
+            notes.append(
+                "LOCAL_LLM_BACKEND=llamacpp runs inside the Pipecat Python process and may contend "
+                "with SenseVoice/Qwen3-TTS on MPS. Prefer LOCAL_LLM_BACKEND=ollama (separate process)."
+            )
+        return notes

@@ -18,7 +18,23 @@
 
 Mac 作为 **Agent 出站连接** LiveKit Cloud，与 [LiveKit Agents 部署模型](https://docs.livekit.io/) 一致：SFU 在云端，推理在边缘。
 
-Cloudflare Tunnel 若使用，仅适合暴露 **HTTP 管理面**（health、配置）；**不要**指望 Tunnel 承载 WebRTC 媒体。
+### Cloudflare 边界（必读）
+
+- **可以 Tunnel**：前端静态页，如 `https://chat.yourdomain.com`  
+- **禁止 Tunnel 代理**：`wss://<project>.livekit.cloud` — 前端与 Mac Agent 均 **原生直连** LiveKit Cloud  
+- WebRTC 媒体不经 Cloudflare；Tunnel 只承载 HTML/JS 即可
+
+详见 [`pipecat-local-agent-mac-ops.md`](pipecat-local-agent-mac-ops.md)。
+
+### MPS 与进程布局
+
+- **Pipecat 进程内**：SenseVoice STT + Qwen3-TTS（`LOCAL_STT_DEVICE` / `LOCAL_TTS_DEVICE=mps`）  
+- **独立进程**：Qwen2.5 via **Ollama**（`LOCAL_LLM_BACKEND=ollama`）— 避免三模型抢 Metal
+
+### 保活
+
+- macOS：**防止自动休眠**  
+- Pipecat：`PIPELINE_ENABLE_HEARTBEATS=1` + `LIVEKIT_AUTO_RECONNECT=1`（`LiveKitParams` 无单独 heartbeat 字段）
 
 ## Pipecat Pipeline
 

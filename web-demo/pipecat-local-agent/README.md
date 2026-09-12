@@ -17,7 +17,15 @@
 └──────────────────────────────────────┘
 ```
 
-Cloudflare Tunnel **仅用于可选的控制面**（如将来暴露配置页）；**音频媒体走 LiveKit Cloud**，不经过 Tunnel。
+### Cloudflare 用法（重要）
+
+| 流量 | 走哪里 |
+|------|--------|
+| 前端页面 `https://chat.yourdomain.com` | **可以** Cloudflare Tunnel |
+| LiveKit `wss://<project>.livekit.cloud` | **必须直连**，不要 Tunnel 代理 |
+| Mac Agent 出站连接 | 直连 LiveKit Cloud |
+
+详见 [`docs/pipecat-local-agent-mac-ops.md`](../../docs/pipecat-local-agent-mac-ops.md)。
 
 ## 快速开始（Mac Mini）
 
@@ -27,10 +35,10 @@ Cloudflare Tunnel **仅用于可选的控制面**（如将来暴露配置页）�
 2. 记下 `wss://xxx.livekit.cloud`、`API Key`、`API Secret`  
 3. 前端/App 用 LiveKit SDK 连同一 room；Mac 上跑 agent 加入同一 room  
 
-### 2. 本地 LLM（llama.cpp / Ollama）
+### 2. 本地 LLM（推荐 Ollama 独立进程，避免 MPS 争抢）
 
 ```bash
-# 示例：Ollama
+# Ollama 作为独立守护进程 — 与 Pipecat 内 SenseVoice/TTS 分离
 ollama serve
 ollama pull qwen2.5:7b
 ```
@@ -105,4 +113,5 @@ python pipecat_agent.py --room voicechat-local
 - `local_services/tts_qwen_local.py` + `tts_runtime.py` — Qwen3-TTS 接入点
 - `local_services/memory_lancedb.py` — LanceDB RAG
 
-详细架构见 `docs/pipecat-local-agent-architecture.md`。
+详细架构见 `docs/pipecat-local-agent-architecture.md`。  
+Mac Mini 运维三项注意（Cloudflare / MPS / 休眠保活）见 `docs/pipecat-local-agent-mac-ops.md`。

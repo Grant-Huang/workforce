@@ -106,12 +106,24 @@ async def entrypoint(room_url: str, token: str, room_name: str, config: LocalAge
 
     worker = PipelineWorker(
         pipeline,
-        params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+        params=PipelineParams(
+            enable_metrics=True,
+            enable_usage_metrics=True,
+            # Pipecat pipeline heartbeats: detect stalls while agent waits idle in room.
+            # (LiveKitParams has no separate heartbeat flag — keep WorkerRunner alive.)
+            enable_heartbeats=config.pipeline_enable_heartbeats,
+            heartbeats_period_secs=config.heartbeats_period_secs,
+            heartbeats_monitor_secs=config.heartbeats_monitor_secs,
+        ),
         processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
 
     runner = WorkerRunner()
     await runner.add_workers(worker)
+
+    @transport.event_handler("on_disconnected")
+    async def on_disconnected(_transport):
+        logger.warning("LiveKit transport disconnected — agent will exit or reconnect per LIVEKIT_AUTO_RECONNECT")
 
     @transport.event_handler("on_first_participant_joined")
     async def on_first_participant_joined(_transport, participant_id):
@@ -146,12 +158,27 @@ async def main():
     args, _unknown = parser.parse_known_args()
     config = LocalAgentConfig.from_env()
 
-    if args.use_runner_config:
-        url, token, room_name, _cfg_args = await configure_with_args(parser)
-    else:
-        url, token, room_name = resolve_livekit_credentials(config, args.room)
+    config.validate_livekit_url_direct()
+    for note in config.warn_mps_layout():
+        logger.warning(note)
 
-    await entrypoint(url, token, room_name, config)
+    while True:
+        if args.use_runner_config:
+            url, token, room_name, _cfg_args = await configure_with_args(parser)
+        else:
+            url, token, room_name = resolve_livekit_credentials(config, args.room)
+
+        try:
+            await entrypoint(url, token, room_name, config)
+        except Exception as exc:
+            logger.exception(f"Agent session ended with error: {exc}")
+        else:
+            logger.info("Agent session ended normally")
+
+        if not config.livekit_auto_reconnect:
+            break
+        logger.info(f"Reconnecting to LiveKit in {config.livekit_reconnect_delay_secs}s…")
+        await asyncio.sleep(config.livekit_reconnect_delay_secs)
 
 
 if __name__ == "__main__":
