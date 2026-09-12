@@ -53,6 +53,7 @@ h1 { margin: 0 0 4px; font-size: 1.4rem; }
 
 .modeSwitcher {
   display: inline-flex;
+  flex-wrap: wrap;
   border: 1px solid var(--border);
   border-radius: 999px;
   overflow: hidden;

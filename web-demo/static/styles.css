@@ -51,6 +51,7 @@ body {
 
 .modeSwitcher {
   display: inline-flex;
+  flex-wrap: wrap;
   border: 1px solid var(--border);
   border-radius: 999px;
   overflow: hidden;
