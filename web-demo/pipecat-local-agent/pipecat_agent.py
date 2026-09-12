@@ -43,6 +43,7 @@ from pipecat.workers.runner import WorkerRunner
 
 from local_services.config import LocalAgentConfig
 from local_services.factory import build_pipeline_services
+from transcript_bridge import TranscriptBridge
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR.parent.parent / ".env")
@@ -91,10 +92,13 @@ async def entrypoint(room_url: str, token: str, room_name: str, config: LocalAge
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
     )
 
+    transcript = TranscriptBridge()
+
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
+            transcript,
             memory,
             user_aggregator,
             llm,

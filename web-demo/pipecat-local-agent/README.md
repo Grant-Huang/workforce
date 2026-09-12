@@ -76,9 +76,23 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-local-mac.txt
 
 # 实现 TTS：编辑 local_services/tts_runtime.py 接入你的 Qwen3-TTS
-
-python pipecat_agent.py --room voicechat-local
+# 或先用云端兜底：LOCAL_TTS_BACKEND=dashscope + QWEN_API_KEY
 ```
+
+### 5. 前端测试（8767）
+
+浏览器 UI 只签发 **用户 token**；Agent 需单独在 Mac 上运行。
+
+```bash
+# 终端 1 — Agent 加入 LiveKit Cloud 房间
+python pipecat_agent.py --room voicechat-local
+
+# 终端 2 — 前端 token 服务 + 静态页
+python server.py
+# 打开 http://127.0.0.1:8767/
+```
+
+页面顶部可切换到 Qwen Realtime（8765）或 LiveKit 对比 demo（8766）。
 
 ## 模型后端（环境变量）
 
@@ -105,7 +119,10 @@ python pipecat_agent.py --room voicechat-local
 
 ## 文件
 
-- `pipecat_agent.py` — 入口
+- `pipecat_agent.py` — Agent 入口（Mac 上手动运行）
+- `server.py` — 前端 token 服务 + 静态页（8767）
+- `index.html` + `static/` — 浏览器测试 UI
+- `transcript_bridge.py` — 转写推送到 LiveKit data channel
 - `local_services/config.py` — 环境变量
 - `local_services/factory.py` — 按 backend 组装服务
 - `local_services/stt_sensevoice.py` — SenseVoice
