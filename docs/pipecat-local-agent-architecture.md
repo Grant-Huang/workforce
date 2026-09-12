@@ -29,7 +29,7 @@ Mac 作为 **Agent 出站连接** LiveKit Cloud，与 [LiveKit Agents 部署模�
 ### MPS 与进程布局
 
 - **Pipecat 进程内**：SenseVoice STT + Qwen3-TTS（`LOCAL_STT_DEVICE` / `LOCAL_TTS_DEVICE=mps`）  
-- **独立进程**：Qwen2.5 via **Ollama**（`LOCAL_LLM_BACKEND=ollama`）— 避免三模型抢 Metal
+- **独立进程**：Qwen2.5 via **llama-server**（`LOCAL_LLM_BACKEND=llamacpp`）— 避免三模型抢 Metal
 
 ### 保活
 
@@ -43,7 +43,7 @@ LiveKitTransport.input()
   → SenseVoiceSTT (LOCAL_STT_*)
   → LanceDBMemoryProcessor (LOCAL_MEMORY_*)
   → LLMContextAggregator (user)
-  → Qwen LLM (LOCAL_LLM_* → llama.cpp / Ollama HTTP)
+  → Qwen LLM (LOCAL_LLM_* → llama-server HTTP)
   → QwenLocalTTS (LOCAL_TTS_*)
   → LiveKitTransport.output()
   → LLMContextAggregator (assistant)
@@ -60,12 +60,13 @@ LiveKitTransport.input()
 | 场景 | 建议 |
 |------|------|
 | Mac 离线 / GPU 忙 | `LOCAL_STT_BACKEND=dashscope` 等云端兜底 |
-| 仅 LLM 本地 | STT/TTS 用 dashscope，LLM 用 ollama |
-| 全本地隐私 | sensevoice + ollama + qwen3_tts + LanceDB |
+| 仅 LLM 本地 | STT/TTS 用 dashscope，LLM 用 llamacpp |
+| 全本地隐私 | sensevoice + llamacpp + qwen3_tts + LanceDB |
 
 ## 前端
 
-手机/网页使用 LiveKit Client SDK，连接 **LiveKit Cloud** 同一 `room`；用户 token 由你的业务后端签发（不要暴露 API Secret）。
+复用 `web-demo/pipecat-livekit/` 同一套页面：`http://127.0.0.1:8766/?ui=local`。  
+手机/网页使用 LiveKit Client SDK，连接 **LiveKit Cloud** 同一 `room`；用户 token 由 `pipecat-livekit/server.py` 签发（不要暴露 API Secret）。
 
 Mac 上 agent token 由 `pipecat_agent.py` 启动时用 `LIVEKIT_API_KEY/SECRET` 生成，或预置 `LIVEKIT_AGENT_TOKEN`。
 

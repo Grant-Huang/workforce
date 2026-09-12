@@ -1,4 +1,4 @@
-"""Local LLM backends: llama.cpp / Ollama / OpenAI-compatible HTTP."""
+"""Local LLM backends: llama-server (llama.cpp) / OpenAI-compatible HTTP."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def build_llm_service(config: LocalAgentConfig):
 
     raise ValueError(
         f"Unknown LOCAL_LLM_BACKEND={backend!r}. "
-        "Use llamacpp, ollama, openai_compat, or dashscope."
+        "Use llamacpp, openai_compat, or dashscope."
     )
 
 

@@ -85,10 +85,10 @@ class LocalAgentConfig:
             stt_model=_env("LOCAL_STT_MODEL", "iic/SenseVoiceSmall"),
             stt_device=_env("LOCAL_STT_DEVICE", "mps"),
             stt_language=_env("LOCAL_STT_LANGUAGE", "auto"),
-            # Default ollama: separate OS process, avoids MPS contention with SenseVoice/TTS in Pipecat.
-            llm_backend=_env("LOCAL_LLM_BACKEND", "ollama").lower(),
-            llm_model=_env("LOCAL_LLM_MODEL", "qwen2.5:7b"),
-            llm_base_url=_env("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434/v1"),
+            # Default llamacpp: llama-server OpenAI-compatible HTTP (separate process).
+            llm_backend=_env("LOCAL_LLM_BACKEND", "llamacpp").lower(),
+            llm_model=_env("LOCAL_LLM_MODEL", "qwen2.5-7b-instruct"),
+            llm_base_url=_env("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8080/v1"),
             llm_api_key=_env("LOCAL_LLM_API_KEY", "local"),
             llm_temperature=float(_env("LOCAL_LLM_TEMPERATURE", "0.7")),
             llm_max_tokens=int(_env("LOCAL_LLM_MAX_TOKENS", "512")),
@@ -139,11 +139,11 @@ class LocalAgentConfig:
             )
 
     def warn_mps_layout(self) -> list[str]:
-        """Return warnings about in-process LLM competing with STT/TTS on MPS."""
+        """Return warnings about LLM layout vs STT/TTS on MPS."""
         notes: list[str] = []
-        if self.llm_backend in ("llamacpp", "local") and self.stt_device == "mps" and self.tts_device == "mps":
+        if self.llm_backend in ("llamacpp", "ollama", "openai_compat") and self.stt_device == "mps" and self.tts_device == "mps":
             notes.append(
-                "LOCAL_LLM_BACKEND=llamacpp runs inside the Pipecat Python process and may contend "
-                "with SenseVoice/Qwen3-TTS on MPS. Prefer LOCAL_LLM_BACKEND=ollama (separate process)."
+                "SenseVoice + Qwen3-TTS share MPS inside Pipecat; keep LLM on llama-server "
+                "(LOCAL_LLM_BACKEND=llamacpp) as a separate process to reduce Metal contention."
             )
         return notes

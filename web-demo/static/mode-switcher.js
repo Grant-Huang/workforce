@@ -1,4 +1,4 @@
-/** Shared pill switcher: Qwen Realtime (8765), LiveKit + Pipecat (8766), Mac local agent (8767). */
+/** Shared pill switcher: Qwen Realtime (8765), LiveKit + Pipecat (8766), Mac local agent (8766?ui=local). */
 (function () {
   const MODES = {
     qwen: {
@@ -11,13 +11,14 @@
     },
     localAgent: {
       label: "Mac 本地 Agent",
-      url: "http://127.0.0.1:8767/",
+      url: "http://127.0.0.1:8766/?ui=local",
     },
   };
 
   function detectCurrentMode() {
     const port = location.port;
-    if (port === "8767") return "localAgent";
+    const params = new URLSearchParams(location.search);
+    if (port === "8766" && params.get("ui") === "local") return "localAgent";
     if (port === "8766") return "livekit";
     return "qwen";
   }

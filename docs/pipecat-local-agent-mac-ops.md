@@ -29,7 +29,7 @@
 
 ---
 
-## 2. MPS 显存竞争：LLM 走 Ollama 独立进程
+## 2. MPS 显存竞争：LLM 走 llama-server 独立进程
 
 SenseVoice（STT）和 Qwen3-TTS 跑在 **Pipecat 同一 Python 进程**内，会争用 Metal/MPS。
 
@@ -37,20 +37,19 @@ SenseVoice（STT）和 Qwen3-TTS 跑在 **Pipecat 同一 Python 进程**内，�
 |------|----------|------|
 | SenseVoice STT | Pipecat 进程内，`LOCAL_STT_DEVICE=mps` | 与音频 pipeline 同进程延迟低 |
 | Qwen3-TTS | Pipecat 进程内，`LOCAL_TTS_DEVICE=mps` | 同上 |
-| Qwen2.5 LLM | **Ollama 独立进程**，HTTP 调用 | 独立内存通道，避免三模型抢 MPS |
+| Qwen2.5 LLM | **llama-server 独立进程**，HTTP 调用 | 独立内存通道，避免三模型抢 MPS |
 
 ```bash
-# Mac Mini 上先起 Ollama（独立守护进程）
-ollama serve
-ollama pull qwen2.5:7b
+# Mac Mini 上先起 llama-server（llama.cpp OpenAI 兼容 API）
+./llama-server -m ~/models/qwen2.5-7b-instruct-q4_k_m.gguf --host 127.0.0.1 --port 8080
 
 # .env
-LOCAL_LLM_BACKEND=ollama
-LOCAL_LLM_MODEL=qwen2.5:7b
-LOCAL_LLM_BASE_URL=http://127.0.0.1:11434/v1
+LOCAL_LLM_BACKEND=llamacpp
+LOCAL_LLM_MODEL=qwen2.5-7b-instruct
+LOCAL_LLM_BASE_URL=http://127.0.0.1:8080/v1
 ```
 
-若必须用 `LOCAL_LLM_BACKEND=llamacpp` 且进程内加载 GGUF，建议 STT/TTS 改 `cpu` 或错峰，启动时会有 warning。
+Pipecat 通过 HTTP 调用 llama-server，不在 Python 进程内加载 GGUF。
 
 ---
 
@@ -95,7 +94,7 @@ LIVEKIT_RECONNECT_DELAY_SECS=5
 
 - [ ] 前端 LiveKit URL = `wss://*.livekit.cloud`，未走 Cloudflare  
 - [ ] Tunnel 仅 `chat.yourdomain.com` 等前端域名  
-- [ ] Ollama 独立运行，LLM 不走进程内 llama.cpp  
+- [ ] llama-server 独立运行，LLM 不走进程内加载 GGUF  
 - [ ] Mac 已禁用自动休眠  
 - [ ] `PIPELINE_ENABLE_HEARTBEATS=1`，`LIVEKIT_AUTO_RECONNECT=1`  
 - [ ] `pipecat_agent.py` 由 launchd 或 tmux 常驻
