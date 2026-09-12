@@ -127,12 +127,6 @@ class LocalAgentConfig:
     def validate_livekit_url_direct(self) -> None:
         """LiveKit Cloud WSS must not be proxied through Cloudflare Tunnel."""
         url = self.livekit_url.lower()
-        proxy_markers = (
-            "cloudflare",
-            "trycloudflare.com",
-            "cfargotunnel.com",
-            "yourdomain.com/chat",  # example anti-pattern only — real check below
-        )
         if any(marker in url for marker in ("cloudflare", "trycloudflare.com", "cfargotunnel.com")):
             raise ValueError(
                 "LIVEKIT_URL must be the native LiveKit Cloud endpoint "
