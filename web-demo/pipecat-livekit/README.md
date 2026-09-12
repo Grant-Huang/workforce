@@ -48,6 +48,17 @@ python server.py
 
 点击「连接并开始」后，`server.py` 会**自动拉起 `bot.py` 子进程**加入同一房间，无需再开第三个终端。
 
+### Mac 本地 Agent 模式（复用本前端）
+
+同一套 `livekit.html`，加 `?ui=local` 即可测试 Mac Mini 出站 Agent（LiveKit Cloud）：
+
+```
+http://127.0.0.1:8766/?ui=local
+```
+
+此模式下 **不会自动 spawn bot**，需先在 Mac 上运行 `web-demo/pipecat-local-agent/pipecat_agent.py`。  
+详见 [`../pipecat-local-agent/README.md`](../pipecat-local-agent/README.md)。
+
 若需手动调试 bot（使用你已安装的 Pipecat 环境）：
 
 ```bash
