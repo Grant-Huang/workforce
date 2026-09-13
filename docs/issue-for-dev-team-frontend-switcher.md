@@ -38,14 +38,12 @@
 ## 手动验收
 
 ```bash
-# 终端 1
-livekit-server --dev --bind 127.0.0.1
-
-# 终端 2
+# 终端 1 — 配置 .env 中 LIVEKIT_URL=wss://*.livekit.cloud 后
 cd web-demo && python server.py          # 8765
 
-# 终端 3
+# 终端 2
 cd web-demo/pipecat-livekit && python server.py  # 8766
+# （不需要本地 livekit-server；SFU 在 LiveKit Cloud）
 ```
 
 1. 打开 http://127.0.0.1:8765/ ，开始语音会话

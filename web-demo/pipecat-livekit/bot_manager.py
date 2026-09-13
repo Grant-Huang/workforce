@@ -1,4 +1,4 @@
-"""Manage the Pipecat bot subprocess for the comparison UI."""
+"""Manage Pipecat bot / local-agent subprocesses for the 8766 UI."""
 
 from __future__ import annotations
 
@@ -11,29 +11,34 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 LOCAL_AGENT_DIR = BASE_DIR.parent / "pipecat-local-agent"
+AGENT_SCRIPT = LOCAL_AGENT_DIR / "pipecat_agent.py"
 
 _process: subprocess.Popen | None = None
 _room: str | None = None
 _stderr_lines: list[str] = []
 _stderr_lock = threading.Lock()
 
+_agent_process: subprocess.Popen | None = None
+_agent_room: str | None = None
+_agent_stderr_lines: list[str] = []
+_agent_stderr_lock = threading.Lock()
 
-def _read_stderr(stream) -> None:
-    global _stderr_lines
+
+def _read_stderr(stream, lines: list[str], lock: threading.Lock) -> None:
     try:
         for line in iter(stream.readline, b""):
             text = line.decode("utf-8", errors="replace").rstrip()
-            with _stderr_lock:
-                _stderr_lines.append(text)
-                if len(_stderr_lines) > 80:
-                    _stderr_lines = _stderr_lines[-80:]
+            with lock:
+                lines.append(text)
+                if len(lines) > 80:
+                    del lines[:-80]
     finally:
         stream.close()
 
 
-def _tail_stderr(limit: int = 8) -> str:
-    with _stderr_lock:
-        return "\n".join(_stderr_lines[-limit:])
+def _tail(lines: list[str], lock: threading.Lock, limit: int = 8) -> str:
+    with lock:
+        return "\n".join(lines[-limit:])
 
 
 def _preflight_livekit_cloud() -> dict | None:
@@ -87,6 +92,10 @@ def is_running() -> bool:
     return _process is not None and _process.poll() is None
 
 
+def is_agent_running() -> bool:
+    return _agent_process is not None and _agent_process.poll() is None
+
+
 def stop() -> None:
     global _process, _room
     if _process is None:
@@ -102,8 +111,28 @@ def stop() -> None:
     _room = None
 
 
+def stop_agent() -> None:
+    global _agent_process, _agent_room
+    if _agent_process is None:
+        return
+    if _agent_process.poll() is None:
+        _agent_process.terminate()
+        try:
+            _agent_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _agent_process.kill()
+            _agent_process.wait(timeout=3)
+    _agent_process = None
+    _agent_room = None
+
+
+def stop_all() -> None:
+    stop()
+    stop_agent()
+
+
 def ensure_started(room: str) -> dict:
-    """Start bot for room if not already running. Returns status dict."""
+    """Start compare-mode bot.py for room if not already running."""
     global _process, _room, _stderr_lines
 
     preflight = _preflight_local_pipeline()
@@ -111,7 +140,7 @@ def ensure_started(room: str) -> dict:
         return preflight
 
     if is_running() and _room == room:
-        return {"status": "running", "room": room, "pid": _process.pid}
+        return {"status": "running", "room": room, "pid": _process.pid, "kind": "bot"}
 
     if is_running():
         stop()
@@ -132,25 +161,114 @@ def ensure_started(room: str) -> dict:
         stderr=subprocess.PIPE,
     )
     _room = room
-    threading.Thread(target=_read_stderr, args=(_process.stderr,), daemon=True).start()
+    threading.Thread(
+        target=_read_stderr,
+        args=(_process.stderr, _stderr_lines, _stderr_lock),
+        daemon=True,
+    ).start()
 
     time.sleep(0.8)
     if _process.poll() is not None:
-        err = _tail_stderr() or f"bot 进程退出，code={_process.returncode}"
+        err = _tail(_stderr_lines, _stderr_lock) or f"bot 进程退出，code={_process.returncode}"
         _process = None
         _room = None
         return {"status": "error", "message": err}
 
-    return {"status": "starting", "room": room, "pid": _process.pid}
+    return {"status": "starting", "room": room, "pid": _process.pid, "kind": "bot"}
+
+
+def ensure_agent_started(room: str) -> dict:
+    """Start pipecat_agent.py (Mac local agent) for room if not already running."""
+    global _agent_process, _agent_room, _agent_stderr_lines
+
+    preflight = _preflight_local_pipeline()
+    if preflight:
+        return preflight
+
+    if not AGENT_SCRIPT.is_file():
+        return {"status": "error", "message": f"缺少 agent 脚本: {AGENT_SCRIPT}"}
+
+    if is_agent_running() and _agent_room == room:
+        return {
+            "status": "running",
+            "room": room,
+            "pid": _agent_process.pid,
+            "kind": "agent",
+        }
+
+    if is_agent_running():
+        stop_agent()
+
+    _agent_stderr_lines = []
+    env = os.environ.copy()
+    env["LIVEKIT_ROOM_NAME"] = room
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(LOCAL_AGENT_DIR), env.get("PYTHONPATH", "")])
+    )
+
+    cmd = [sys.executable, str(AGENT_SCRIPT), "--room", room]
+    _agent_process = subprocess.Popen(
+        cmd,
+        cwd=str(LOCAL_AGENT_DIR),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    _agent_room = room
+    threading.Thread(
+        target=_read_stderr,
+        args=(_agent_process.stderr, _agent_stderr_lines, _agent_stderr_lock),
+        daemon=True,
+    ).start()
+
+    time.sleep(0.8)
+    if _agent_process.poll() is not None:
+        err = (
+            _tail(_agent_stderr_lines, _agent_stderr_lock)
+            or f"agent 进程退出，code={_agent_process.returncode}"
+        )
+        _agent_process = None
+        _agent_room = None
+        return {"status": "error", "message": err}
+
+    return {
+        "status": "starting",
+        "room": room,
+        "pid": _agent_process.pid,
+        "kind": "agent",
+    }
 
 
 def get_status() -> dict:
     if not is_running():
-        err = _tail_stderr(12) if _stderr_lines else ""
+        err = _tail(_stderr_lines, _stderr_lock, 12) if _stderr_lines else ""
         return {
             "status": "stopped",
             "room": _room,
+            "kind": "bot",
             "error": err or None,
             "exit_code": _process.returncode if _process else None,
         }
-    return {"status": "running", "room": _room, "pid": _process.pid}
+    return {"status": "running", "room": _room, "pid": _process.pid, "kind": "bot"}
+
+
+def get_agent_status() -> dict:
+    if not is_agent_running():
+        err = (
+            _tail(_agent_stderr_lines, _agent_stderr_lock, 12)
+            if _agent_stderr_lines
+            else ""
+        )
+        return {
+            "status": "stopped",
+            "room": _agent_room,
+            "kind": "agent",
+            "error": err or None,
+            "exit_code": _agent_process.returncode if _agent_process else None,
+        }
+    return {
+        "status": "running",
+        "room": _agent_room,
+        "pid": _agent_process.pid,
+        "kind": "agent",
+    }

@@ -126,17 +126,7 @@ class LocalAgentConfig:
 
     def validate_livekit_url_direct(self) -> None:
         """LiveKit Cloud WSS must not be proxied through Cloudflare Tunnel."""
-        url = self.livekit_url.lower()
-        if any(marker in url for marker in ("cloudflare", "trycloudflare.com", "cfargotunnel.com")):
-            raise ValueError(
-                "LIVEKIT_URL must be the native LiveKit Cloud endpoint "
-                "(wss://<project>.livekit.cloud). Do NOT route LiveKit signaling through Cloudflare Tunnel."
-            )
-        if "livekit.cloud" not in url:
-            raise ValueError(
-                "LIVEKIT_URL must be wss://<your-project>.livekit.cloud. "
-                "Frontends and Mac agent connect to LiveKit Cloud directly (not local livekit-server)."
-            )
+        assert_livekit_cloud_url(self.livekit_url, "LIVEKIT_URL")
 
     def warn_mps_layout(self) -> list[str]:
         """Return warnings about LLM layout vs STT/TTS on MPS."""
@@ -147,3 +137,20 @@ class LocalAgentConfig:
                 "(LOCAL_LLM_BACKEND=llamacpp) as a separate process to reduce Metal contention."
             )
         return notes
+
+
+def assert_livekit_cloud_url(url: str, var_name: str = "LIVEKIT_URL") -> None:
+    """Require a native LiveKit Cloud WSS URL (not Cloudflare Tunnel / local SFU)."""
+    normalized = (url or "").strip().lower()
+    if not normalized:
+        raise ValueError(f"{var_name} is required (wss://<project>.livekit.cloud).")
+    if any(marker in normalized for marker in ("cloudflare", "trycloudflare.com", "cfargotunnel.com")):
+        raise ValueError(
+            f"{var_name} must be the native LiveKit Cloud endpoint "
+            "(wss://<project>.livekit.cloud). Do NOT route LiveKit signaling through Cloudflare Tunnel."
+        )
+    if "livekit.cloud" not in normalized:
+        raise ValueError(
+            f"{var_name} must be wss://<your-project>.livekit.cloud. "
+            "Frontends and Mac agent connect to LiveKit Cloud directly (not local livekit-server)."
+        )

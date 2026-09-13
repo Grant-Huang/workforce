@@ -57,13 +57,24 @@ python server.py
 
 连接后 `server.py` 自动拉起 `bot.py` 加入 **LiveKit Cloud** 同一房间。
 
-### Mac 本地 Agent 模式（手动 spawn）
+### Mac 本地 Agent 模式
 
 ```
 http://127.0.0.1:8766/?ui=local
 ```
 
-需另开终端：`python ../pipecat-local-agent/pipecat_agent.py --room <房间名>`
+两种拉起方式：
+
+```bash
+# A. 手动
+python ../pipecat-local-agent/pipecat_agent.py --room <房间名>
+
+# B. 可选 HTTP 唤醒（可用 Cloudflare Tunnel 暴露此 API，勿代理 LiveKit）
+curl -X POST 'http://127.0.0.1:8766/api/agent/wake?room=<房间名>'
+# 若配置了 AGENT_WAKE_TOKEN：
+curl -X POST -H "Authorization: Bearer $AGENT_WAKE_TOKEN" \
+  'http://127.0.0.1:8766/api/agent/wake?room=<房间名>'
+```
 
 ## Pipeline
 
@@ -74,9 +85,9 @@ Browser ──WebRTC──► LiveKit Cloud ◄──WebRTC── Pipecat bot (M
 
 ## 文件
 
-- `bot.py` — Pipecat pipeline（本地 STT/LLM/TTS）
-- `server.py` — Token + 静态页（8766）
+- `bot.py` — Pipecat pipeline（本地 STT/LLM/TTS，compare 模式）
+- `server.py` — Token + 静态页 + `/api/agent/wake`（8766）
+- `bot_manager.py` — bot / agent 子进程管理
 - `livekit_env.py` — LiveKit Cloud 配置校验
 - `livekit.html` / `static/` — 前端
-
-本地 dev 模式（`livekit-server --dev`）已不再作为默认；仅调试时可自行改 `.env`，生产请用 LiveKit Cloud。
+- `archive/start-livekit.sh` — **已归档**：旧本地 `livekit-server --dev`，请勿用于当前架构

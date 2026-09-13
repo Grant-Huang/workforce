@@ -20,9 +20,9 @@ Mac 作为 **Agent 出站连接** LiveKit Cloud，与 [LiveKit Agents 部署模�
 
 ### Cloudflare 边界（必读）
 
-- **可以 Tunnel**：前端静态页，如 `https://chat.yourdomain.com`  
+- **可以 Tunnel**：前端静态页，如 `https://chat.yourdomain.com`；可选 HTTP `POST /api/agent/wake` 唤醒 Mac 上的 `pipecat_agent.py`
 - **禁止 Tunnel 代理**：`wss://<project>.livekit.cloud` — 前端与 Mac Agent 均 **原生直连** LiveKit Cloud  
-- WebRTC 媒体不经 Cloudflare；Tunnel 只承载 HTML/JS 即可
+- WebRTC 媒体不经 Cloudflare；Tunnel 只承载 HTML/JS（及可选 wake API）即可
 
 详见 [`pipecat-local-agent-mac-ops.md`](pipecat-local-agent-mac-ops.md)。
 

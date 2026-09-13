@@ -25,7 +25,18 @@
 
 **后果**：额外 WebSocket 握手延迟、Idle 断连、WebRTC ICE 异常。
 
-`pipecat_agent.py` 启动时会校验：`LIVEKIT_URL` 含 `cloudflare` / `trycloudflare` 等关键字会直接报错。
+`pipecat_agent.py` 启动时会校验：`LIVEKIT_URL` / `LIVEKIT_URL_PUBLIC` 含 `cloudflare` / `trycloudflare` 等关键字会直接报错；必须为 `wss://*.livekit.cloud`。
+
+### 可选：经 Tunnel 唤醒 Agent
+
+前端或运维脚本可调用 8766 上的：
+
+```bash
+POST /api/agent/wake?room=<房间名>
+# Header: Authorization: Bearer <AGENT_WAKE_TOKEN>   # 若 .env 配置了密钥
+```
+
+只把 **UI / 此 HTTP API** 放进 Cloudflare Tunnel；LiveKit Cloud WSS 仍由浏览器与 Mac **直连**。
 
 ---
 

@@ -11,7 +11,7 @@ LOCAL_AGENT_DIR = BASE_DIR.parent / "pipecat-local-agent"
 if str(LOCAL_AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(LOCAL_AGENT_DIR))
 
-from local_services.config import LocalAgentConfig
+from local_services.config import LocalAgentConfig, assert_livekit_cloud_url
 
 
 def load_livekit_config() -> LocalAgentConfig:
@@ -30,3 +30,10 @@ def livekit_settings() -> dict[str, str]:
         "room": cfg.livekit_room,
         "agent_identity": os.environ.get("LIVEKIT_AGENT_IDENTITY", "Pipecat Local Agent"),
     }
+
+
+__all__ = [
+    "assert_livekit_cloud_url",
+    "livekit_settings",
+    "load_livekit_config",
+]
