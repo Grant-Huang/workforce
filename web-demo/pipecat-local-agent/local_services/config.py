@@ -79,7 +79,7 @@ class LocalAgentConfig:
             livekit_url=_env("LIVEKIT_URL", "wss://your-project.livekit.cloud"),
             livekit_api_key=_env("LIVEKIT_API_KEY"),
             livekit_api_secret=_env("LIVEKIT_API_SECRET"),
-            livekit_room=_env("LIVEKIT_ROOM_NAME", "voicechat-local"),
+            livekit_room=_env("LIVEKIT_ROOM_NAME", "voicechat"),
             livekit_agent_token=_env("LIVEKIT_AGENT_TOKEN"),
             stt_backend=_env("LOCAL_STT_BACKEND", "sensevoice").lower(),
             stt_model=_env("LOCAL_STT_MODEL", "iic/SenseVoiceSmall"),
@@ -132,10 +132,10 @@ class LocalAgentConfig:
                 "LIVEKIT_URL must be the native LiveKit Cloud endpoint "
                 "(wss://<project>.livekit.cloud). Do NOT route LiveKit signaling through Cloudflare Tunnel."
             )
-        if "livekit.cloud" not in url and not url.startswith("ws://127.0.0.1"):
+        if "livekit.cloud" not in url:
             raise ValueError(
-                "LIVEKIT_URL should be wss://<your-project>.livekit.cloud for production. "
-                "Frontends and Mac agent must connect to LiveKit Cloud directly."
+                "LIVEKIT_URL must be wss://<your-project>.livekit.cloud. "
+                "Frontends and Mac agent connect to LiveKit Cloud directly (not local livekit-server)."
             )
 
     def warn_mps_layout(self) -> list[str]:

@@ -36,8 +36,33 @@ def _tail_stderr(limit: int = 8) -> str:
         return "\n".join(_stderr_lines[-limit:])
 
 
+def _preflight_livekit_cloud() -> dict | None:
+    try:
+        from livekit_env import load_livekit_config
+
+        load_livekit_config()
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
+    if not os.environ.get("LIVEKIT_API_KEY") or not os.environ.get("LIVEKIT_API_SECRET"):
+        return {
+            "status": "error",
+            "message": "LIVEKIT_API_KEY / LIVEKIT_API_SECRET 未配置（LiveKit Cloud 项目凭证）",
+        }
+    url = os.environ.get("LIVEKIT_URL", "").lower()
+    if "livekit.cloud" not in url:
+        return {
+            "status": "error",
+            "message": "LIVEKIT_URL 必须为 wss://<project>.livekit.cloud",
+        }
+    return None
+
+
 def _preflight_local_pipeline() -> dict | None:
     """Return error dict if local pipeline prerequisites look missing."""
+    cloud_err = _preflight_livekit_cloud()
+    if cloud_err:
+        return cloud_err
+
     stt = os.environ.get("LOCAL_STT_BACKEND", "sensevoice").lower()
     llm = os.environ.get("LOCAL_LLM_BACKEND", "llamacpp").lower()
     tts = os.environ.get("LOCAL_TTS_BACKEND", "qwen3_tts").lower()
@@ -93,9 +118,6 @@ def ensure_started(room: str) -> dict:
 
     _stderr_lines = []
     env = os.environ.copy()
-    env.setdefault("LIVEKIT_URL", os.environ.get("LIVEKIT_URL", "ws://127.0.0.1:7880"))
-    env.setdefault("LIVEKIT_API_KEY", os.environ.get("LIVEKIT_API_KEY", "devkey"))
-    env.setdefault("LIVEKIT_API_SECRET", os.environ.get("LIVEKIT_API_SECRET", "secret"))
     env["LIVEKIT_ROOM_NAME"] = room
     env["PYTHONPATH"] = os.pathsep.join(
         filter(None, [str(LOCAL_AGENT_DIR), env.get("PYTHONPATH", "")])

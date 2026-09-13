@@ -153,7 +153,7 @@ function startWaitingForBot() {
       hint = `请确认 Mac 上已运行 python pipecat_agent.py --room ${roomName}，且 LIVEKIT_URL/凭证与 .env 一致。`;
     } else {
       hint =
-        "请确认：1) LiveKit server 已启动；2) llama-server 与本地模型已运行；3) 查看 server.py / bot.py 终端日志";
+        "请确认：1) .env 中 LIVEKIT_URL=wss://*.livekit.cloud 与 API 凭证正确；2) llama-server 与本地模型已运行；3) 查看 server.py / bot.py 日志";
       try {
         const resp = await fetch("/api/bot/status");
         const body = await resp.json();
