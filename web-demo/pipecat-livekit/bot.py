@@ -9,7 +9,7 @@ Run:
   pip install -r ../pipecat-local-agent/requirements-local-mac.txt
   python bot.py --room voicechat-compare
 
-Requires LiveKit server (see README) and local models in repo-root .env (LOCAL_*).
+Requires LiveKit Cloud (LIVEKIT_* in .env) and local models (LOCAL_*).
 """
 
 from __future__ import annotations
@@ -66,6 +66,8 @@ async def main():
     url, token, room_name, args = await configure_with_args(parser)
 
     config = LocalAgentConfig.from_env()
+    config.validate_livekit()
+    config.validate_livekit_url_direct()
 
     transport = LiveKitTransport(
         url=url,

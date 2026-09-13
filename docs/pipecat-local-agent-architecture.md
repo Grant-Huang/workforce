@@ -73,5 +73,5 @@ Mac 上 agent token 由 `pipecat_agent.py` 启动时用 `LIVEKIT_API_KEY/SECRET`
 ## 相关目录
 
 - `web-demo/pipecat-local-agent/` — 本 agent
-- `web-demo/pipecat-livekit/` — 8766 云端 DashScope 对比 demo
+- `web-demo/pipecat-livekit/` — 8766 LiveKit Cloud + 本地 Pipecat pipeline
 - `web-demo/` — 8765 Qwen Realtime WebSocket demo

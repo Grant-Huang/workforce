@@ -3,16 +3,14 @@
 Serves the browser page, issues LiveKit participant tokens, and auto-starts
 the Pipecat bot subprocess when the user connects (compare mode).
 
-Mac local agent mode (`?ui=local` or PIPECAT_UI_MODE=local_agent): reuses this
-same frontend; only issues user tokens — run `pipecat_agent.py` separately.
+All modes use **LiveKit Cloud** (wss://*.livekit.cloud) — configure LIVEKIT_*
+in repo-root .env.
 
 Run:
   cd web-demo/pipecat-livekit
   python server.py
   # -> http://127.0.0.1:8766
   # Mac local agent UI: http://127.0.0.1:8766/?ui=local
-
-Also requires LiveKit server (compare) or LiveKit Cloud credentials (local agent).
 """
 
 from __future__ import annotations
@@ -36,13 +34,20 @@ load_dotenv(BASE_DIR.parent.parent / ".env")
 
 HOST = os.environ.get("PIPECAT_HOST", os.environ.get("HOST", "127.0.0.1"))
 PORT = int(os.environ.get("PIPECAT_PORT", "8766"))
-
-LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "ws://127.0.0.1:7880")
-LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
-LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
-DEFAULT_ROOM = os.environ.get("LIVEKIT_ROOM_NAME", "voicechat-compare")
-AGENT_IDENTITY = os.environ.get("LIVEKIT_AGENT_IDENTITY", "Pipecat Local Agent")
 UI_MODE_ENV = os.environ.get("PIPECAT_UI_MODE", "").strip().lower()
+
+try:
+    from livekit_env import livekit_settings
+
+    _LK = livekit_settings()
+except ValueError as exc:
+    raise SystemExit(f"LiveKit Cloud 配置错误: {exc}") from exc
+
+LIVEKIT_URL = _LK["url"]
+LIVEKIT_API_KEY = _LK["api_key"]
+LIVEKIT_API_SECRET = _LK["api_secret"]
+DEFAULT_ROOM = _LK["room"]
+AGENT_IDENTITY = _LK["agent_identity"]
 
 
 def _query_ui_mode(request: web.Request) -> str:
@@ -57,12 +62,6 @@ def _is_local_agent_ui(request: web.Request) -> bool:
     return _query_ui_mode(request) == "localAgent"
 
 
-def _default_room(request: web.Request) -> str:
-    if _is_local_agent_ui(request):
-        return os.environ.get("LIVEKIT_ROOM_NAME", "voicechat-local")
-    return DEFAULT_ROOM
-
-
 async def index(_request):
     return web.FileResponse(BASE_DIR / "livekit.html")
 
@@ -73,7 +72,7 @@ async def config(request):
     data = {
         "uiMode": ui_mode,
         "livekitUrl": LIVEKIT_URL,
-        "defaultRoom": _default_room(request),
+        "defaultRoom": DEFAULT_ROOM,
         "agentIdentity": AGENT_IDENTITY if is_local else "Pipecat Agent",
         "autoSpawnBot": not is_local,
         "hasLiveKitCredentials": bool(LIVEKIT_API_KEY and LIVEKIT_API_SECRET),
@@ -82,22 +81,15 @@ async def config(request):
         "sttBackend": os.environ.get("LOCAL_STT_BACKEND", "sensevoice"),
         "llmBackend": os.environ.get("LOCAL_LLM_BACKEND", "llamacpp"),
         "ttsBackend": os.environ.get("LOCAL_TTS_BACKEND", "qwen3_tts"),
+        "architecture": "LiveKit Cloud + 本地 Pipecat pipeline (SenseVoice → Qwen2.5 → Qwen TTS)",
     }
     if is_local:
-        data["architecture"] = "LiveKit Cloud + Mac Mini local agent (STT → LLM → TTS)"
-    else:
-        data["architecture"] = "LiveKit WebRTC + Pipecat 本地 pipeline (SenseVoice → Qwen2.5 → Qwen TTS)"
+        data["note"] = "本模式需手动运行 pipecat_agent.py"
     return web.json_response({"status": "success", "data": data})
 
 
 async def livekit_token(request):
-    if not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
-        return web.json_response(
-            {"status": "error", "message": "LIVEKIT_API_KEY / LIVEKIT_API_SECRET not configured"},
-            status=500,
-        )
-
-    room = request.query.get("room") or _default_room(request)
+    room = request.query.get("room") or DEFAULT_ROOM
     participant = request.query.get("participant") or f"user-{uuid.uuid4().hex[:8]}"
     is_local = _is_local_agent_ui(request)
 
@@ -150,7 +142,7 @@ app.router.add_static("/static/", BASE_DIR / "static")
 if __name__ == "__main__":
     print(f"LiveKit UI: http://{HOST}:{PORT}/")
     print(f"Mac local agent UI: http://{HOST}:{PORT}/?ui=local")
-    print(f"LiveKit URL: {LIVEKIT_URL}  default room: {DEFAULT_ROOM}")
+    print(f"LiveKit Cloud: {LIVEKIT_URL}  room: {DEFAULT_ROOM}")
     if UI_MODE_ENV in ("local", "local_agent"):
         print("PIPECAT_UI_MODE=local_agent — token API 不会自动 spawn bot")
     else:
