@@ -6,8 +6,17 @@
 
 网页 demo 的完整说明（怎么跑起来、架构、功能设计、实测记录）见 [`web-demo/README.md`](web-demo/README.md)。
 
+<<<<<<< HEAD
+**LiveKit + Pipecat 对比方案**（模块化 STT→LLM→TTS，WebRTC 传输）见 [`web-demo/pipecat-livekit/README.md`](web-demo/pipecat-livekit/README.md) 与 [`docs/pipecat-livekit-comparison.md`](docs/pipecat-livekit-comparison.md)。
+
+**Mac Mini 本地 Agent + LiveKit Cloud 出站**（SenseVoice / llama.cpp / Qwen3-TTS / LanceDB，模型可环境变量配置）见 [`web-demo/pipecat-local-agent/README.md`](web-demo/pipecat-local-agent/README.md) 与 [`docs/pipecat-local-agent-architecture.md`](docs/pipecat-local-agent-architecture.md)。
+
 ## 相关文档
 
+=======
+## 相关文档
+
+>>>>>>> origin/claude/voice-input-cross-platform-app-pxo3yp
 - [`docs/app-design.md`](docs/app-design.md) — 完整功能设计（三种交互模式、口述转文字、回复长度策略等）
 - [`docs/qwen-realtime-voice-setup.md`](docs/qwen-realtime-voice-setup.md) — Qwen Realtime API 踩过的坑（域名选择、模型/音色选型）
 - [`docs/agentnexus-memory-integration-proposal.md`](docs/agentnexus-memory-integration-proposal.md) — 给智枢（AgentNexus）团队的记忆体系集成建议

@@ -1,0 +1,7 @@
+python-dotenv>=1.0
+loguru>=0.7
+pipecat-ai[livekit,silero]>=1.8.0
+livekit-api>=1.2.0
+
+# Cloud fallback (LOCAL_*_BACKEND=dashscope) reuses pipecat-livekit dashscope_services
+dashscope>=1.24.0
