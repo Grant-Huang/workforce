@@ -152,7 +152,8 @@ function startWaitingForBot() {
       const roomName = config?.defaultRoom || "voicechat-local";
       hint = `请确认 Mac 上已运行 python pipecat_agent.py --room ${roomName}，且 LIVEKIT_URL/凭证与 .env 一致。`;
     } else {
-      hint = "请确认：1) LiveKit server 已启动；2) .env 里 QWEN_API_KEY 已配置；3) 查看 server.py 终端日志";
+      hint =
+        "请确认：1) LiveKit server 已启动；2) llama-server 与本地模型已运行；3) 查看 server.py / bot.py 终端日志";
       try {
         const resp = await fetch("/api/bot/status");
         const body = await resp.json();
@@ -199,8 +200,9 @@ async function loadConfig() {
       const backends = [config.sttBackend, config.llmBackend, config.ttsBackend].join(" / ");
       setMetrics(`后端: ${backends}`);
     }
-  } else if (!config.hasQwenKey) {
-    setMetrics("警告：QWEN_API_KEY 未配置，连接时会失败");
+  } else {
+    const backends = [config.sttBackend, config.llmBackend, config.ttsBackend].join(" / ");
+    setMetrics(`本地 pipeline 后端: ${backends}（需 llama-server + 本地模型已就绪）`);
   }
 }
 

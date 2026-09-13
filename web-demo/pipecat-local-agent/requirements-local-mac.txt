@@ -6,5 +6,6 @@ funasr>=1.1.0
 lancedb>=0.6.0
 sentence-transformers>=2.7.0
 
-# Qwen3-TTS: install your local package / fork here, then implement
-# local_services/tts_runtime.py or set LOCAL_TTS_MODULE
+# Local Qwen3-TTS (self-hosted)
+qwen-tts>=0.1.0
+soundfile>=0.12.0

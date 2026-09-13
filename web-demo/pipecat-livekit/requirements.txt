@@ -3,4 +3,6 @@ python-dotenv>=1.0
 loguru>=0.7
 pipecat-ai[livekit,silero]>=1.8.0
 livekit-api>=1.2.0
+# 本地 pipeline 还需: pip install -r ../pipecat-local-agent/requirements-local-mac.txt
+# 云端兜底（LOCAL_*_BACKEND=dashscope）:
 dashscope>=1.24.0

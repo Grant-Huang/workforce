@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
+LOCAL_AGENT_DIR = BASE_DIR.parent / "pipecat-local-agent"
 
 _process: subprocess.Popen | None = None
 _room: str | None = None
@@ -35,6 +36,28 @@ def _tail_stderr(limit: int = 8) -> str:
         return "\n".join(_stderr_lines[-limit:])
 
 
+def _preflight_local_pipeline() -> dict | None:
+    """Return error dict if local pipeline prerequisites look missing."""
+    stt = os.environ.get("LOCAL_STT_BACKEND", "sensevoice").lower()
+    llm = os.environ.get("LOCAL_LLM_BACKEND", "llamacpp").lower()
+    tts = os.environ.get("LOCAL_TTS_BACKEND", "qwen3_tts").lower()
+    api_key = os.environ.get("QWEN_API_KEY", "")
+
+    if stt == "dashscope" and not api_key:
+        return {"status": "error", "message": "LOCAL_STT_BACKEND=dashscope 需要 QWEN_API_KEY"}
+    if llm == "dashscope" and not api_key:
+        return {"status": "error", "message": "LOCAL_LLM_BACKEND=dashscope 需要 QWEN_API_KEY"}
+    if tts == "dashscope" and not api_key:
+        return {"status": "error", "message": "LOCAL_TTS_BACKEND=dashscope 需要 QWEN_API_KEY"}
+
+    if not LOCAL_AGENT_DIR.is_dir():
+        return {
+            "status": "error",
+            "message": f"缺少本地服务目录: {LOCAL_AGENT_DIR}",
+        }
+    return None
+
+
 def is_running() -> bool:
     return _process is not None and _process.poll() is None
 
@@ -58,11 +81,9 @@ def ensure_started(room: str) -> dict:
     """Start bot for room if not already running. Returns status dict."""
     global _process, _room, _stderr_lines
 
-    if not os.environ.get("QWEN_API_KEY"):
-        return {
-            "status": "error",
-            "message": "QWEN_API_KEY 未配置。请在仓库根目录 .env 中设置后重启 server.py",
-        }
+    preflight = _preflight_local_pipeline()
+    if preflight:
+        return preflight
 
     if is_running() and _room == room:
         return {"status": "running", "room": room, "pid": _process.pid}
@@ -76,6 +97,9 @@ def ensure_started(room: str) -> dict:
     env.setdefault("LIVEKIT_API_KEY", os.environ.get("LIVEKIT_API_KEY", "devkey"))
     env.setdefault("LIVEKIT_API_SECRET", os.environ.get("LIVEKIT_API_SECRET", "secret"))
     env["LIVEKIT_ROOM_NAME"] = room
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(LOCAL_AGENT_DIR), env.get("PYTHONPATH", "")])
+    )
 
     cmd = [sys.executable, str(BASE_DIR / "bot.py"), "--room", room]
     _process = subprocess.Popen(
@@ -88,7 +112,6 @@ def ensure_started(room: str) -> dict:
     _room = room
     threading.Thread(target=_read_stderr, args=(_process.stderr,), daemon=True).start()
 
-    # Give the bot a moment to fail fast (missing deps, bad key format, etc.)
     time.sleep(0.8)
     if _process.poll() is not None:
         err = _tail_stderr() or f"bot 进程退出，code={_process.returncode}"

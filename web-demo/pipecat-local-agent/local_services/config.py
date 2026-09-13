@@ -93,7 +93,7 @@ class LocalAgentConfig:
             llm_temperature=float(_env("LOCAL_LLM_TEMPERATURE", "0.7")),
             llm_max_tokens=int(_env("LOCAL_LLM_MAX_TOKENS", "512")),
             tts_backend=_env("LOCAL_TTS_BACKEND", "qwen3_tts").lower(),
-            tts_model=_env("LOCAL_TTS_MODEL", "qwen3-tts"),
+            tts_model=_env("LOCAL_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"),
             tts_device=_env("LOCAL_TTS_DEVICE", "mps"),
             tts_voice=_env("LOCAL_TTS_VOICE", "Cherry"),
             tts_sample_rate=int(_env("LOCAL_TTS_SAMPLE_RATE", "24000")),

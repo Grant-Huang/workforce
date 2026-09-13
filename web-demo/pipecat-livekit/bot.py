@@ -1,14 +1,15 @@
 """LiveKit + Pipecat voice bot for comparison with Qwen Realtime WebSocket demo.
 
-Pipeline (modular STT -> LLM -> TTS):
-  transport.input -> STT -> user_aggregator -> LLM -> TTS -> transport.output -> assistant_aggregator
+Pipeline (local STT -> LLM -> TTS):
+  SenseVoice STT -> LLM (llama-server / Qwen2.5) -> Qwen3-TTS (local)
 
 Run:
   cd web-demo/pipecat-livekit
   pip install -r requirements.txt
+  pip install -r ../pipecat-local-agent/requirements-local-mac.txt
   python bot.py --room voicechat-compare
 
-Requires LiveKit server (see README) and QWEN_API_KEY in repo-root .env.
+Requires LiveKit server (see README) and local models in repo-root .env (LOCAL_*).
 """
 
 from __future__ import annotations
@@ -32,64 +33,39 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.runner.livekit import configure_with_args
-from pipecat.services.qwen.llm import QwenLLMService
 from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
 from pipecat.workers.runner import WorkerRunner
 
-from dashscope_services import DashScopeSTTService, DashScopeTTSV2Service
 from transcript_bridge import TranscriptBridge
 
 BASE_DIR = Path(__file__).resolve().parent
+LOCAL_AGENT_DIR = BASE_DIR.parent / "pipecat-local-agent"
+if str(LOCAL_AGENT_DIR) not in sys.path:
+    sys.path.insert(0, str(LOCAL_AGENT_DIR))
+
+from local_services.config import LocalAgentConfig
+from local_services.factory import build_llm_service, build_stt, build_tts
+
 load_dotenv(BASE_DIR.parent.parent / ".env")
 
-BASE_INSTRUCTIONS = """你是一个语音助手，正在和用户实时语音对话。
 
-说话方式：
-- 像日常聊天一样自然口语化，不要用书面语。
-- 不要用任何视觉格式：不用列表符号、编号、加粗，也不要读网址或代码。
-- 回答尽量简洁，适合语音播报。"""
-
-
-def compatible_mode_base() -> str:
-    workspace_id = os.environ.get("QWEN_WORKSPACE_ID", "")
-    if workspace_id:
-        return f"https://{workspace_id}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-    return "https://dashscope.aliyuncs.com/compatible-mode/v1"
-
-
-def build_services():
-    api_key = os.environ.get("QWEN_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("QWEN_API_KEY not set in .env")
-
-    stt_model = os.environ.get("PIPECAT_STT_MODEL", "paraformer-realtime-v1")
-    llm_model = os.environ.get("PIPECAT_LLM_MODEL", "qwen-plus")
-    tts_model = os.environ.get("PIPECAT_TTS_MODEL", "cosyvoice-v3-flash")
-    tts_voice = os.environ.get("PIPECAT_TTS_VOICE", os.environ.get("QWEN_VOICE", "longxiaochun_v2"))
-
-    stt = DashScopeSTTService(api_key=api_key, model=stt_model)
-    llm = QwenLLMService(
-        api_key=api_key,
-        base_url=compatible_mode_base(),
-        settings=QwenLLMService.Settings(
-            model=llm_model,
-            system_instruction=BASE_INSTRUCTIONS,
-            temperature=0.7,
-            max_completion_tokens=512,
-        ),
-    )
-    tts = DashScopeTTSV2Service(
-        api_key=api_key,
-        model=tts_model,
-        voice=tts_voice,
-        sample_rate=24000,
+def build_services(config: LocalAgentConfig):
+    for note in config.warn_mps_layout():
+        logger.warning(note)
+    stt = build_stt(config)
+    llm = build_llm_service(config)
+    tts = build_tts(config)
+    logger.info(
+        f"Pipeline backends: stt={config.stt_backend} llm={config.llm_backend} tts={config.tts_backend}"
     )
     return stt, llm, tts
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="LiveKit + Pipecat voice bot")
+    parser = argparse.ArgumentParser(description="LiveKit + Pipecat voice bot (local pipeline)")
     url, token, room_name, args = await configure_with_args(parser)
+
+    config = LocalAgentConfig.from_env()
 
     transport = LiveKitTransport(
         url=url,
@@ -102,7 +78,7 @@ async def main():
         ),
     )
 
-    stt, llm, tts = build_services()
+    stt, llm, tts = build_services(config)
     transcript_bridge = TranscriptBridge()
 
     context = LLMContext()
@@ -141,10 +117,13 @@ async def main():
         logger.info(f"Participant joined: {participant_id}")
         await asyncio.sleep(0.5)
         await worker.queue_frame(
-            TTSSpeakFrame("你好，我是 LiveKit 加 Pipecat 的语音助手。你可以开始说话了。")
+            TTSSpeakFrame("你好，我是 LiveKit 加 Pipecat 的本地语音助手。你可以开始说话了。")
         )
 
-    logger.info(f"Bot joining LiveKit room={room_name} url={url}")
+    logger.info(
+        f"Bot joining LiveKit room={room_name} url={url} "
+        f"stt={config.stt_backend} llm={config.llm_backend} tts={config.tts_backend}"
+    )
     await runner.run()
 
 

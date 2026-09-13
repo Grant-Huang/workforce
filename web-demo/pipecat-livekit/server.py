@@ -79,14 +79,14 @@ async def config(request):
         "hasLiveKitCredentials": bool(LIVEKIT_API_KEY and LIVEKIT_API_SECRET),
         "hasQwenKey": bool(os.environ.get("QWEN_API_KEY")),
         "compareUrl": "http://127.0.0.1:8765/",
+        "sttBackend": os.environ.get("LOCAL_STT_BACKEND", "sensevoice"),
+        "llmBackend": os.environ.get("LOCAL_LLM_BACKEND", "llamacpp"),
+        "ttsBackend": os.environ.get("LOCAL_TTS_BACKEND", "qwen3_tts"),
     }
     if is_local:
         data["architecture"] = "LiveKit Cloud + Mac Mini local agent (STT → LLM → TTS)"
-        data["llmBackend"] = os.environ.get("LOCAL_LLM_BACKEND", "llamacpp")
-        data["sttBackend"] = os.environ.get("LOCAL_STT_BACKEND", "sensevoice")
-        data["ttsBackend"] = os.environ.get("LOCAL_TTS_BACKEND", "qwen3_tts")
     else:
-        data["architecture"] = "LiveKit WebRTC + Pipecat (STT -> LLM -> TTS)"
+        data["architecture"] = "LiveKit WebRTC + Pipecat 本地 pipeline (SenseVoice → Qwen2.5 → Qwen TTS)"
     return web.json_response({"status": "success", "data": data})
 
 
@@ -154,5 +154,5 @@ if __name__ == "__main__":
     if UI_MODE_ENV in ("local", "local_agent"):
         print("PIPECAT_UI_MODE=local_agent — token API 不会自动 spawn bot")
     else:
-        print("Compare mode: bot 会在浏览器连接时自动启动（需 QWEN_API_KEY）")
+        print("Compare mode: bot 会在浏览器连接时自动启动（本地 SenseVoice + llama-server + Qwen TTS）")
     web.run_app(app, host=HOST, port=PORT)
