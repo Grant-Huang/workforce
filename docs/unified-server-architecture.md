@@ -82,11 +82,10 @@
 5. **`relay(request)` / `dictation_cleanup(request)` / `memory_extract(request)`** — 8765 的 handler 完整搬过来
 6. **`add_static`** — 两个不同 prefix 命名空间，避免 `/static/*` 冲突
 
-### 2.3 完整路由表（25 条）
+### 2.3 完整路由表（21 条，2026-09-13 合并掉 4 条 LiveKit 专属路由）
 
 ```
-GET  /                            index         mode 分发 → index.html | livekit.html
-GET  /livekit.html                livekit_page  显式入口（书签 / 分享链接）
+GET  /                            index         单页 (index.html) — app.js 按 ?mode= 分发
 GET  /shared/mode-switcher.js     shared_mode_switcher  → web-demo/static/mode-switcher.js
 
 GET  /api/config                  unified_config          ?mode= 分发（qwen | livekit）
@@ -95,15 +94,22 @@ GET  /ws                          relay                   Qwen Realtime WebSocke
 POST /api/dictation-cleanup       dictation_cleanup       Qwen one-shot text call
 POST /api/memory-extract          memory_extract          Qwen one-shot memory extraction
 
-GET  /api/livekit/token           livekit_token           LiveKit Cloud JWT + 拉 bot
+GET  /api/livekit/token           livekit_token           LiveKit Cloud JWT + 拉本地 agent
 GET  /api/bot/status              bot_status
 GET  /api/agent/status            agent_status
 GET  /api/agent/wake              agent_wake              bot_manager.ensure_agent_started
 POST /api/agent/wake              agent_wake
 
-GET  /static/*                    → web-demo/static/                       (Qwen side assets)
-GET  /livekit-static/*            → web-demo/pipecat-livekit/static/       (LiveKit side assets)
+GET  /static/*                    → web-demo/static/                       (Qwen + LiveKit 共用)
 ```
+
+**已删除**：
+- `GET /livekit.html` — livekit.html 文件已删，unified 路由也不再注册
+- `GET /livekit-static/*` — pipecat-livekit/static/ 目录已删（livekit-app.js / livekit-styles.css 整合到 /static/）
+- 内部 `_resolve_mode` / `_is_local_agent_ui` / `_query_ui_mode` helper 函数（不再需要 — `?mode=livekit` 永远等价 localAgent）
+- `compareUrl` / `localAgentUrl` 字段（`?mode=livekit&ui=local` 的 compare A/B 模式已废弃）
+
+详见 §5.9 / §7.5。
 
 ### 2.4 mode-switcher.js 改造
 
@@ -224,6 +230,126 @@ bot 是**按需 spawn**（用户进 LiveKit 房间才拉）。这跟 8766 legacy
 
 **未来改进**：可以加 `PRELOAD_BOT=1` env，启动 unified 时后台预热一次，token API 就快了。
 
+### 5.5 `livekit-app.js` 必须显式 `?mode=livekit`
+
+`/api/config` 默认返回 Qwen shape(`{voice, voices, hasKey, hasWorkspaceId}`)。`livekit-app.js` 里 `loadConfig()` 必须显式 `fetch('/api/config?mode=livekit...')`,否则 `body.data = undefined`,后续 `config.sttBackend` 全爆。
+
+**根因**:这是 unified server 模式的天然后果 —— 同一个 endpoint,两种 shape,前端必须告诉后端要哪种。**前端代码里有详细注释**说明为什么不能省略 query,避免后人改回。
+
+### 5.6 TTS voice 必须用 Qwen3-TTS-12Hz-0.6B-CustomVoice 实际支持的列表
+
+`LOCAL_TTS_VOICE` 的合法值仅限 Qwen3-TTS-12Hz-0.6B-CustomVoice 模型实际支持的 9 个 voice：
+
+```
+aiden, dylan, eric, ono_anna, ryan, serena, sohee, uncle_fu, vivian
+```
+
+**坑过**:`Cherry` 这个名字是从 Qwen3.5-Omni-Realtime 的 voice 列表沿用过来的(`web-demo/server.py::VOICE_OPTIONS`),**但 Qwen3-TTS-12Hz-0.6B-CustomVoice 不支持它**。如果 `.env` 里写了 `Cherry`,bot 进房间后每次 TTS synthesize 都抛 `ValueError: Unsupported speakers: ['Cherry']`,所有 audio frame 被吞,浏览器永远"等待欢迎语"。
+
+**修法**:用上面列表里的 voice。中文友好的:`serena`(中性女声)、`vivian`(英文女声)。默认值 `Cherry` 改成 `vivian` —— 见 `LocalAgentConfig.from_env()` 的 `tts_voice=_env("LOCAL_TTS_VOICE", "vivian")`。
+
+**验证**:拿到 voice 列表的方法 ——
+
+```bash
+.venv/bin/python -c "
+from local_services.tts_qwen_local import QwenLocalTTSService
+from local_services.config import LocalAgentConfig
+import os
+os.environ['LOCAL_TTS_VOICE'] = 'something_wrong'
+svc = QwenLocalTTSService(LocalAgentConfig.from_env())
+# 尝试 synthesize, ValueError 错误消息里包含 supported 列表
+"
+```
+
+### 5.7 改 `.env` 后必须重启 unified server
+
+unified server 启动时 `load_dotenv(.env)` 一次后,环境变量就锁定了。子进程(`ensure_agent_started` → Popen)继承 `os.environ`,**不会重新 source** `.env`。改完 `.env` 必须:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/ai.workforce.unified.plist
+launchctl load -w ~/Library/LaunchAgents/ai.workforce.unified.plist
+# 然后再 wake 一次让 agent 子进程拿新 env
+curl -s "http://127.0.0.1:8788/api/agent/wake?room=voicechat-compare"
+```
+
+或者简单验证当前 unified 进程的 env:
+
+```bash
+PID=$(lsof -nP -iTCP:8788 -sTCP:LISTEN -t)
+ps eww -p $PID 2>&1 | tr ' ' '\n' | grep "^LOCAL_TTS_VOICE="
+```
+
+### 5.8 Agent 默认会 idle-timeout cancel(5 分钟无活动)
+
+pipecat 1.9 的 `PipelineParams` 默认 `cancel_on_idle_timeout=True` + `cancel_runner_on_idle_timeout=True` + `IDLE_TIMEOUT_SECS=300`。**坑过**:agent 进房间等用户,如果用户 5 分钟内没出现,PipelineWorker 自动 cancel,LiveKit 那边 agent 变成断开状态。但**Python Popen 进程不会退出**,所以 `is_agent_running()` 仍然返回 True,`/api/agent/status` 误报 running,前端一直等 bot 实际不存在的房间。
+
+**修法**(已加):
+1. `pipecat_agent.py` 把 `cancel_on_idle_timeout=False` + `cancel_runner_on_idle_timeout=False` —— agent 永久等用户
+2. `bot_manager.py` 加 `is_agent_connected_to_livekit()` 通过 LiveKit admin API 验证 participant 真实存在,跟 `is_agent_running()` 区分
+3. `get_agent_status()` 用 `is_agent_connected_to_livekit()`,发现 stale 就清掉 `_agent_process` 引用让下次 wake 干净重启
+
+**调试方法** —— 看 LiveKit Cloud 上 room 实际有哪些 participant:
+
+```python
+import asyncio, os
+from livekit.api import LiveKitAPI, ListParticipantsRequest
+async def main():
+    url = os.environ['LIVEKIT_URL'].replace('wss://', 'https://')
+    api = LiveKitAPI(url, os.environ['LIVEKIT_API_KEY'], os.environ['LIVEKIT_API_SECRET'])
+    try:
+        resp = await api.room.list_participants(ListParticipantsRequest(room='voicechat-compare'))
+        for p in resp.participants:
+            print(f'  {p.identity} state={p.state}')
+    finally:
+        await api.aclose()
+asyncio.run(main())
+```
+
+state=2 是 ACTIVE,其他值是 joining/leaving/disconnected。
+
+### 5.9 三个 Pill 合并成两个（2026-09-13）
+
+原 mode-switcher.js 暴露三个 pill：`Qwen Realtime` / `LiveKit + Pipecat` / `Mac 本地 Agent`。观察发现：
+- 用户**永远只在 Qwen ↔ Mac 本地 Agent 之间切换**，从来不点中间的 "LiveKit + Pipecat"（compare A/B）
+- 后两个 pill 走同一套本地 pipeline（SenseVoice STT → llama.cpp Qwen2.5 → Qwen3-TTS），只是启动方式不同（`bot.py` 自动 spawn vs `pipecat_agent.py` 手动 wake）
+
+**合并方案**：
+- 删 "LiveKit + Pipecat" pill
+- 保留两个：`Qwen Realtime` / `Mac 本地 Agent`
+- `?mode=livekit`（不再需要 `&ui=local`）**永远等价 localAgent**，因为这是用户实际在用的
+- `/api/livekit/token` 不再区分 is_local，**永远 lazy-spawn 本地 agent**（`ensure_agent_started()`）
+- 删除 `_resolve_mode` / `_is_local_agent_ui` / `_query_ui_mode` helper（不再需要 mode 分流到不同 bot）
+
+### 5.10 LiveKit 模式复用 Qwen 的 UI 状态机
+
+合并 pill 后，`/?mode=livekit` 不再用独立的 `livekit.html`（带 status 卡片 + "连接并开始" 按钮），而是直接复用 `index.html`（Qwen 的对话气泡 UI）。前端代码：`web-demo/static/livekit-bridge.js` 在 `?mode=livekit` 时跑 IIFE 接管 micBtn。
+
+UI 状态机完全对齐 Qwen 的 `setState(STATE.X)`：
+
+| state | micBtn label | micBtn 样式 | voiceOrb |
+|---|---|---|---|
+| `idle` | "连接并开始" | 无 `.active` | 隐藏 |
+| `connecting` | "连接中…" | 无 `.active`, disabled | 显示 |
+| `listening` | "断开" | `.active`（红背景） | 显示 |
+| `speaking` | "断开" | `.active` + `.speaking`（红+ pulse） | 显示 |
+| `connected` | "断开" | `.active` | 显示（alias for listening） |
+
+数据通道（LiveKit data channel）收到的 transcript 帧触发状态切换：
+
+```js
+// LiveKit data channel → JSON {type:"transcript", role:"user"|"assistant", text, final?}
+//   role === "user"        → speaking → listening（appendBubble("user", text)）
+//   role === "assistant"   → speaking（增量 stream）→ listening（final=true 时新 bubble）
+```
+
+**Mock 测试验证**（`~/work/projects/_test-fixtures/livekit-mock-bot/mock_bot.py`）：13 帧 mixed（中英 + 多行 + 特殊字符 →）渲染成 8 个 bubble，字符级一致无丢字。
+
+### 5.11 CD 破缓存用 `?v=N` query string 戳
+
+CF Tunnel 默认给静态资源 `cache-control: max-age=14400`（4 小时），破缓存靠在 URL 加 query string key（不是真的"v"参数，是 URL key）。
+
+`/static/app.js`、`/static/mode-switcher.js`、`/static/livekit-bridge.js` 在 index.html 里都带 `?v=N`。**bump 一次 `?v=N`（N 单调递增）即可强制 CF MISS → origin**。
+
 ---
 
 ## 6. 未来扩展
@@ -239,12 +365,19 @@ bot 是**按需 spawn**（用户进 LiveKit 房间才拉）。这跟 8766 legacy
 - 静态资源命名空间（再加一个 `/<pipeline>-static/*`）
 - mode-switcher.js 加一个 mode
 
-### 6.2 把 legacy 退役
+### 6.2 把 legacy 退役（2026-09-13 部分完成）
 
-等 unified server 稳定后：
+**已完成**（本轮 phase 1）：
+- 删 `web-demo/pipecat-livekit/livekit.html`
+- 删 `web-demo/pipecat-livekit/static/`（livekit-app.js / livekit-styles.css 整合到 `/static/`）
+- unified_server 路由中删 `/livekit.html` + `/livekit-static/*`
+- unified_server 内部 helper `_resolve_mode` / `_is_local_agent_ui` / `_query_ui_mode` 删除
+- `/api/livekit/token` 不再区分 is_local（永远 lazy-spawn 本地 agent）
+
+**待完成**（legacy server 进程仍跑，作为应急回滚）：
 
 ```bash
-# 1. 卸载 legacy LaunchAgent
+# 1. 确认 workforce.inkpath.cc 稳定后，卸载 legacy LaunchAgent
 launchctl unload ~/Library/LaunchAgents/ai.workforce.pipecat-livekit.plist
 launchctl unload ~/Library/LaunchAgents/ai.workforce.web-demo.plist
 
@@ -254,8 +387,10 @@ rm ~/Library/LaunchAgents/ai.workforce.web-demo.plist
 rm ~/work/projects/workforce/.launchd-wrappers/start-8765.sh
 rm ~/work/projects/workforce/.launchd-wrappers/start-8766.sh
 
-# 3. 改 cloudflared config.yml,把 workforce-l 也指向 unified server(或删掉那条)
-# 然后 launchctl reload cloudflared
+# 3. 改 cloudflared config.yml,把 workforce-l 也指向 unified server（或删掉那条）
+# 然后 launchctl unload && load -w ~/Library/LaunchAgents/ai.workforce.cloudflared.plist
+
+# 4. web-demo/pipecat-livekit/server.py 暂时保留（仅 dev 用）— 但 production 路由不再用它
 ```
 
 ### 6.3 unified server 拆成多个 worker
@@ -318,6 +453,24 @@ rm ~/work/projects/workforce/.launchd-wrappers/start-8766.sh
 
 **未来**：如果有更优雅的方案（比如 `launchctl setenv` 在 user space 注入）可以考虑。当前 wrapper 模式足够简单清晰。
 
+### 7.5 三 Pill 合并成两 Pill（2026-09-13）
+
+**决策**：删除 "LiveKit + Pipecat"（compare A/B）pill，只保留 "Qwen Realtime" + "Mac 本地 Agent"。
+
+**理由**：
+- 用户实际行为：永远在 Qwen ↔ Mac 本地 Agent 之间切换，中间 pill 没人点
+- 后两个 pill 走同一套本地 pipeline（SenseVoice + llama.cpp + Qwen3-TTS），只是启动方式不同：`bot.py`（自动 spawn on token）/ `pipecat_agent.py`（手动 wake）。对话体验完全一样。
+- 三 pill 增加 UI 噪音 + 用户认知负担（"LiveKit + Pipecat" 和 "Mac 本地 Agent" 看起来很像，实际区别只在自动/手动）
+
+**实现**：
+- `?mode=livekit` 永远等价 `localAgent`（不再需要 `&ui=local`）
+- `/api/livekit/token` 永远 lazy-spawn 本地 agent
+- 删除 unified_server 内部 `_resolve_mode` / `_is_local_agent_ui` / `_query_ui_mode` helper
+- 删除 `web-demo/pipecat-livekit/livekit.html` 和 `web-demo/pipecat-livekit/static/`（整合到 `/static/`）
+- 新增 `web-demo/static/livekit-bridge.js`（IIFE 在 `?mode=livekit` 时接管 micBtn，复用 Qwen 的 `setState` 视觉契约）
+
+**与 7.2 不动 legacy 的取舍**：legacy 进程（8765/8766）**仍然跑着**，作为应急回滚入口。本轮不退役它们（详见 §6.2）。
+
 ---
 
 ## 8. 相关文件
@@ -325,15 +478,18 @@ rm ~/work/projects/workforce/.launchd-wrappers/start-8766.sh
 | 路径 | 角色 |
 |---|---|
 | `web-demo/unified_server.py` | unified server 主入口，~480 行，合并 8765+8766 路由 |
-| `web-demo/static/mode-switcher.js` | 单域名 pill 切换器（改写自原 8766 版本） |
-| `web-demo/pipecat-livekit/livekit.html` | livekit 页面，资源路径改 `/livekit-static/*` |
+| `web-demo/static/mode-switcher.js` | 单域名 pill 切换器（改写自原 8766 版本，2 个 pill） |
+| `web-demo/static/livekit-bridge.js` | LiveKit 模式接管 micBtn，复用 Qwen UI（IIFE） |
 | `web-demo/pipecat-livekit/bot_manager.py` | bot 子进程管理（unified server 复用） |
 | `web-demo/pipecat-livekit/livekit_env.py` | LiveKit Cloud settings 加载 + URL 校验 |
 | `web-demo/pipecat-local-agent/local_services/*.py` | 本地 ML pipeline（STT/TTS/LLM/memory），bot_manager 调用 |
+| `~/work/projects/_test-fixtures/livekit-mock-bot/mock_bot.py` | Mock bot：注入 transcript frames 测试前端 UI（不进 git） |
 | `~/.cloudflared/config.yml` | `workforce.inkpath.cc → 127.0.0.1:8788` |
 | `~/Library/LaunchAgents/ai.workforce.unified.plist` | LaunchAgent 定义 |
 | `~/work/projects/workforce/.launchd-wrappers/start-8788.sh` | wrapper shell（不在 plist 里放 secret） |
 | `~/work/projects/workforce/.env` | Qwen + LiveKit + LOCAL_* 凭证（权限 600） |
+
+> **删除的文件**（2026-09-13）：`web-demo/pipecat-livekit/livekit.html`、`web-demo/pipecat-livekit/static/livekit-app.js`、`web-demo/pipecat-livekit/static/livekit-styles.css`
 
 ---
 
@@ -350,3 +506,7 @@ rm ~/work/projects/workforce/.launchd-wrappers/start-8766.sh
 | 2026-09-12 ~22:15 | token API 又崩，发现 TTS 同样的 pipecat 1.9 bug，修 `tts_qwen_local.py` |
 | 2026-09-12 ~22:20 | token API 跑通，KeepAlive 真崩测试通过 |
 | 2026-09-12 ~22:30 | 更新文档（PR 文档扩到 TTS，部署手册改 unified，新增本设计文档） |
+| 2026-09-13 ~00:00 | TTS Cherry 报错诊断 → 改 `.env` + `config.py` 默认值 `vivian` |
+| 2026-09-13 ~00:20 | pipecat 1.9 idle timeout 默认 5 分钟 cancel pipeline，agent 误报 running。修 `cancel_on_idle_timeout=False` + `is_agent_connected_to_livekit()` |
+| 2026-09-13 ~07:00 | 三 Pill 合并成两 Pill：删 livekit.html + pipecat-livekit/static/；新增 livekit-bridge.js |
+| 2026-09-13 ~07:30 | Browserbase + mock_bot 验证多轮 UI：8 bubble 字符级一致 |

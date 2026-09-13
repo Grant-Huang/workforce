@@ -118,6 +118,14 @@ async def entrypoint(room_url: str, token: str, room_name: str, config: LocalAge
             enable_heartbeats=config.pipeline_enable_heartbeats,
             heartbeats_period_secs=config.heartbeats_period_secs,
             heartbeats_monitor_secs=config.heartbeats_monitor_secs,
+            # Don't cancel the pipeline if no user shows up within 5 minutes.
+            # Default pipecat 1.9 cancels after IDLE_TIMEOUT_SECS=300s, but our
+            # agents are meant to wait indefinitely in the room for the user to
+            # connect (user might have the page open on phone, refresh, etc.).
+            # The heartbeat monitor above still detects stalls — we just don't
+            # kill the worker for "no activity yet".
+            cancel_on_idle_timeout=False,
+            cancel_runner_on_idle_timeout=False,
         ),
         processor_unusable_policy=ProcessorUnusablePolicy.END,
     )

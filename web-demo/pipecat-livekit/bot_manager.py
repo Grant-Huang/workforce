@@ -96,6 +96,47 @@ def is_agent_running() -> bool:
     return _agent_process is not None and _agent_process.poll() is None
 
 
+def is_agent_connected_to_livekit() -> bool:
+    """Verify via LiveKit Cloud admin API that the agent is actually in the room.
+
+    Popen process being alive doesn't mean the pipecat pipeline is healthy:
+    pipecat 1.9 cancels pipeline worker on idle timeout but the Python process
+    keeps running, so is_agent_running() returns True while the agent is
+    effectively disconnected. Checking LiveKit Cloud for the participant
+    gives ground truth.
+    """
+    if _agent_process is None or _agent_process.poll() is not None or not _agent_room:
+        return False
+    try:
+        asyncio.run(_check_agent_in_room(_agent_room))
+    except Exception:
+        # If admin API fails (network etc.), fall back to process-alive heuristic.
+        return _agent_process.poll() is None
+    return True
+
+
+async def _check_agent_in_room(room: str) -> bool:
+    import os as _os
+
+    from livekit.api import LiveKitAPI, ListParticipantsRequest
+
+    url = _os.environ.get("LIVEKIT_URL", "").replace("wss://", "https://").rstrip("/")
+    api_key = _os.environ.get("LIVEKIT_API_KEY", "")
+    api_secret = _os.environ.get("LIVEKIT_API_SECRET", "")
+    if not url or not api_key or not api_secret:
+        return False
+    api = LiveKitAPI(url, api_key, api_secret)
+    try:
+        resp = await api.room.list_participants(ListParticipantsRequest(room=room))
+        agent_identity = _os.environ.get("LIVEKIT_AGENT_IDENTITY", "Pipecat Local Agent")
+        for p in resp.participants:
+            if p.identity == agent_identity and str(p.state) == "2":  # 2 = ACTIVE
+                return True
+        return False
+    finally:
+        await api.aclose()
+
+
 def stop() -> None:
     global _process, _room
     if _process is None:
@@ -253,18 +294,26 @@ def get_status() -> dict:
 
 
 def get_agent_status() -> dict:
-    if not is_agent_running():
+    global _agent_process, _agent_room
+    if not is_agent_connected_to_livekit():
         err = (
             _tail(_agent_stderr_lines, _agent_stderr_lock, 12)
             if _agent_stderr_lines
             else ""
         )
+        # If the Popen process is alive but the agent isn't actually in the room
+        # (pipecat idle-timeout cancel or LiveKit SFU drop), return stopped so
+        # /api/agent/wake knows to spawn a fresh one.
+        exit_code = _agent_process.returncode if _agent_process else None
+        # Force-clear the stale Popen reference so the next wake starts fresh.
+        _agent_process = None
+        _agent_room = None
         return {
             "status": "stopped",
             "room": _agent_room,
             "kind": "agent",
             "error": err or None,
-            "exit_code": _agent_process.returncode if _agent_process else None,
+            "exit_code": exit_code,
         }
     return {
         "status": "running",

@@ -22,3 +22,7 @@ __pycache__/
 ## macOS LaunchAgent wrapper scripts (per-host, hold .env source path;
 ## deploy scripts live at .launchd-wrappers/start-{8765,8766}.sh, never commit)
 .launchd-wrappers/
+
+## Local TTS / STT / LanceDB cache (generated at runtime by pipecat_agent.py,
+## pipecat-livekit/bot.py — never commit. See docs/local-deployment-and-test-runbook.md §6.7)
+web-demo/pipecat-local-agent/data/

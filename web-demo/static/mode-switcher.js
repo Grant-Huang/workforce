@@ -1,32 +1,33 @@
-/** Shared pill switcher for the unified `workforce.inkpath.cc` server (port 8787).
+/** Shared pill switcher for the unified `workforce.inkpath.cc` server (port 8788).
  *
  * Single-domain mode dispatch — toggles `?mode=` query instead of cross-domain nav,
- * so the audio session (WebSocket for Qwen Realtime / LiveKit room for Pipecat)
- * tears down gracefully via `onBeforeLeave` and the new mode spins up in the same tab.
+ * so the audio session (WebSocket for Qwen Realtime / LiveKit room for the local
+ * agent) tears down gracefully via `onBeforeLeave` and the new mode spins up in
+ * the same tab.
  *
- * Three modes:
+ * Two modes ( was three — compare mode dropped because users only ever pick
+ * either the cloud Realtime demo OR the local Pipecat agent, never the side-by-side
+ * A/B comparison):
  *   qwen       — Qwen3.5-Omni-Realtime cloud WebSocket (default)
- *   livekit    — LiveKit Cloud + Mac Pipecat bot (compare mode)
- *   localAgent — LiveKit Cloud + Mac Pipecat bot, manual agent control (?ui=local)
+ *   localAgent — LiveKit Cloud + Mac Pipecat bot (?mode=livekit)
+ *
+ * v=2 marker (2026-09-13) — collapsed from 3 pills to 2.
  */
 (function () {
   function targetFor(mode) {
     if (mode === "qwen") return "/";
-    if (mode === "livekit") return "/?mode=livekit";
-    if (mode === "localAgent") return "/?mode=livekit&ui=local";
+    if (mode === "localAgent") return "/?mode=livekit";
     return "/";
   }
 
   const MODES = {
     qwen: { label: "Qwen Realtime", url: targetFor("qwen") },
-    livekit: { label: "LiveKit + Pipecat", url: targetFor("livekit") },
     localAgent: { label: "Mac 本地 Agent", url: targetFor("localAgent") },
   };
 
   function detectCurrentMode() {
     const params = new URLSearchParams(location.search);
-    if (params.get("mode") === "livekit" && params.get("ui") === "local") return "localAgent";
-    if (params.get("mode") === "livekit") return "livekit";
+    if (params.get("mode") === "livekit") return "localAgent";
     return "qwen";
   }
 
@@ -37,7 +38,6 @@
     container.innerHTML = `
       <div class="modeSwitcher" role="tablist" aria-label="语音方案切换">
         <button type="button" class="modeSwitcherBtn" data-mode="qwen" role="tab">Qwen Realtime</button>
-        <button type="button" class="modeSwitcherBtn" data-mode="livekit" role="tab">LiveKit + Pipecat</button>
         <button type="button" class="modeSwitcherBtn" data-mode="localAgent" role="tab">Mac 本地 Agent</button>
       </div>
     `;

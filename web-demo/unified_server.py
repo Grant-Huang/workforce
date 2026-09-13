@@ -41,9 +41,7 @@ from dotenv import load_dotenv
 WEB_DEMO_DIR = Path(__file__).resolve().parent            # .../workforce/web-demo
 PIPECAT_LIVEKIT_DIR = WEB_DEMO_DIR / "pipecat-livekit"    # .../workforce/web-demo/pipecat-livekit
 STATIC_8765 = WEB_DEMO_DIR / "static"
-STATIC_8766 = PIPECAT_LIVEKIT_DIR / "static"
 INDEX_HTML = WEB_DEMO_DIR / "index.html"
-LIVEKIT_HTML = PIPECAT_LIVEKIT_DIR / "livekit.html"
 MODE_SWITCHER_JS = STATIC_8765 / "mode-switcher.js"  # unified copy lives here
 
 # Ensure pip dependencies and bot_manager are importable
@@ -148,25 +146,9 @@ if LIVEKIT_URL_PUBLIC:
 
 AGENT_WAKE_TOKEN = os.environ.get("AGENT_WAKE_TOKEN", "").strip()
 
-UI_MODE_ENV = os.environ.get("PIPECAT_UI_MODE", "").strip().lower()
-
 
 def _token_url() -> str:
     return LIVEKIT_URL_PUBLIC or LIVEKIT_URL
-
-
-def _query_ui_mode(request: web.Request) -> str:
-    """Same logic as 8766's server.py — picks localAgent vs compare based on
-    `?ui=local` or PIPECAT_UI_MODE env."""
-    if UI_MODE_ENV in ("local", "local_agent"):
-        return "localAgent"
-    if request.query.get("ui") == "local":
-        return "localAgent"
-    return "compare"
-
-
-def _is_local_agent_ui(request: web.Request) -> bool:
-    return _query_ui_mode(request) == "localAgent"
 
 
 def _wake_authorized(request: web.Request) -> bool:
@@ -179,31 +161,22 @@ def _wake_authorized(request: web.Request) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Mode dispatch helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _resolve_mode(request: web.Request) -> str:
-    """Return 'qwen' or 'livekit' based on `?mode=` query (default qwen).
-
-    Livekit.html has its own internal `?ui=local` for local-agent mode — that
-    doesn't change the top-level mode."""
-    return request.query.get("mode", "qwen").strip().lower()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Page handlers
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def index(request: web.Request):
-    mode = _resolve_mode(request)
-    if mode == "livekit":
-        return web.FileResponse(LIVEKIT_HTML)
-    return web.FileResponse(INDEX_HTML)
+    # Single page (index.html) serves both modes — app.js branches on
+    # `?mode=livekit` to render the LiveKit / Mac local agent UI.
+    return _html_response(INDEX_HTML)
 
 
-async def livekit_page(_request: web.Request):
-    """Explicit entry point — same as /?mode=livekit, for bookmarks / share links."""
-    return web.FileResponse(LIVEKIT_HTML)
+def _html_response(html_path) -> web.FileResponse:
+    """Wrap a FileResponse with Cache-Control: no-cache so CF edge revalidates
+    on every request. Stale HTML is the worst-case deploy bug — it loads an
+    outdated JS/CSS bundle and the user gets a broken page for 4 hours."""
+    resp = web.FileResponse(html_path)
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 async def shared_mode_switcher(_request: web.Request):
@@ -343,28 +316,22 @@ async def memory_extract(request: web.Request):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def unified_config(request: web.Request):
-    """Single /api/config that returns the right shape per mode.
+    """Single /api/config — returns Qwen shape by default, LiveKit shape when `?mode=livekit`.
 
-    The frontend's app.js (Qwen) reads {voice, voices, hasKey, hasWorkspaceId}.
-    The frontend's livekit-app.js reads {livekitUrl, defaultRoom, agentIdentity,
-    hasLiveKitCredentials, hasQwenKey, sttBackend, llmBackend, ttsBackend,
-    architecture, wakeEndpoint, ...}.
-
-    The mode= query picks the shape so the same endpoint serves both."""
-    mode = _resolve_mode(request)
+    Both shapes are returned as `{status: "success", data: {...}}` so the unified
+    frontend (app.js) can dispatch on the same envelope regardless of mode.
+    """
+    mode = request.query.get("mode", "qwen").strip().lower()
     if mode == "livekit":
-        ui_mode = _query_ui_mode(request)
-        is_local = ui_mode == "localAgent"
         data = {
-            "uiMode": ui_mode,
+            "uiMode": "localAgent",
             "livekitUrl": _token_url(),
             "defaultRoom": DEFAULT_ROOM,
-            "agentIdentity": AGENT_IDENTITY if is_local else "Pipecat Agent",
-            "autoSpawnBot": not is_local,
+            "agentIdentity": AGENT_IDENTITY,
+            "autoSpawnBot": True,
             "hasLiveKitCredentials": bool(LIVEKIT_API_KEY and LIVEKIT_API_SECRET),
             "hasQwenKey": bool(os.environ.get("QWEN_API_KEY")),
-            "compareUrl": "/?mode=qwen",                # single-domain: same hostname, different mode
-            "localAgentUrl": "/?mode=livekit&ui=local",
+            "qwenUrl": "/?mode=qwen",
             "sttBackend": os.environ.get("LOCAL_STT_BACKEND", "sensevoice"),
             "llmBackend": os.environ.get("LOCAL_LLM_BACKEND", "llamacpp"),
             "ttsBackend": os.environ.get("LOCAL_TTS_BACKEND", "qwen3_tts"),
@@ -372,11 +339,6 @@ async def unified_config(request: web.Request):
             "wakeEndpoint": "/api/agent/wake",
             "wakeAuthRequired": bool(AGENT_WAKE_TOKEN),
         }
-        if is_local:
-            data["note"] = (
-                "本模式可用 POST/GET /api/agent/wake?room=... 拉起 pipecat_agent.py，"
-                "或手动运行该脚本"
-            )
         return web.json_response({"status": "success", "data": data})
 
     # mode == qwen (default) — return Qwen Realtime config
@@ -410,16 +372,16 @@ async def agent_wake(request: web.Request):
 async def livekit_token(request: web.Request):
     room = request.query.get("room") or DEFAULT_ROOM
     participant = request.query.get("participant") or f"user-{uuid.uuid4().hex[:8]}"
-    is_local = _is_local_agent_ui(request)
 
-    bot_status_data = None
-    if not is_local:
-        bot_status_data = ensure_started(room)
-        if bot_status_data.get("status") == "error":
-            return web.json_response(
-                {"status": "error", "message": bot_status_data.get("message", "bot 启动失败")},
-                status=503,
-            )
+    # Two-pill consolidation: `?mode=livekit` is always localAgent mode now
+    # (compare A/B mode was removed). Token API lazy-starts the local agent
+    # so the user doesn't have to hit /api/agent/wake separately.
+    bot_status_data = ensure_agent_started(room)
+    if bot_status_data.get("status") == "error":
+        return web.json_response(
+            {"status": "error", "message": bot_status_data.get("message", "agent 启动失败")},
+            status=503,
+        )
 
     # Lazy import — pipecat.runner.livekit only loads when first token is requested
     from pipecat.runner.livekit import generate_token
@@ -431,11 +393,10 @@ async def livekit_token(request: web.Request):
         "url": _token_url(),
         "room": room,
         "participant": participant,
-        "uiMode": "localAgent" if is_local else "compare",
-        "agentIdentity": AGENT_IDENTITY if is_local else "Pipecat Agent",
+        "uiMode": "localAgent",
+        "agentIdentity": AGENT_IDENTITY,
+        "bot": bot_status_data,
     }
-    if bot_status_data is not None:
-        payload["bot"] = bot_status_data
     return web.json_response({"status": "success", "data": payload})
 
 
@@ -452,7 +413,6 @@ app.on_shutdown.append(on_shutdown)
 
 # Pages
 app.router.add_get("/", index)
-app.router.add_get("/livekit.html", livekit_page)
 app.router.add_get("/shared/mode-switcher.js", shared_mode_switcher)
 
 # Unified config (mode-dispatched)
@@ -470,9 +430,24 @@ app.router.add_get("/api/agent/wake", agent_wake)
 app.router.add_post("/api/agent/wake", agent_wake)
 app.router.add_get("/api/livekit/token", livekit_token)
 
-# Static assets — namespaced to avoid /static/* collision
-app.router.add_static("/static/", STATIC_8765, show_index=False)        # Qwen side
-app.router.add_static("/livekit-static/", STATIC_8766, show_index=False)  # LiveKit side
+# Static assets — only the unified /static/ namespace now (livekit-static/* removed).
+# Cache-Control: no-cache forces browsers (and CF edge) to revalidate via
+# ETag/Last-Modified on every request, so a fresh deploy is visible immediately
+# instead of waiting for the 4h CDN TTL.
+app.router.add_static("/static/", STATIC_8765, show_index=False)
+
+
+@web.middleware
+async def _no_cache_for_static(request, handler):
+    """aiohttp middleware: inject Cache-Control: no-cache on static responses
+    so CF Tunnel edge + browsers don't serve a 4h-stale JS bundle after a deploy."""
+    response: web.StreamResponse = await handler(request)
+    if request.path.startswith("/static/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
+app.middlewares.append(_no_cache_for_static)
 
 # Note: PRODUCTION check for AgentNexus mock dropped — we only run this server
 # in production (port 8788 behind CF Tunnel); the 8765 standalone can keep the
@@ -493,7 +468,5 @@ if __name__ == "__main__":
     print(f"Listening on {HOST}:{PORT}")
     print(f"Single domain: https://workforce.inkpath.cc/")
     print(f"  Default (Qwen Realtime)         : /")
-    print(f"  LiveKit + Pipecat               : /?mode=livekit")
-    print(f"  Mac local agent                 : /?mode=livekit&ui=local")
-    print(f"  Legacy fallback (workforce-l)   : still served by 8766 separately")
+    print(f"  Mac local agent                 : /?mode=livekit")
     web.run_app(app, host=HOST, port=PORT)

@@ -403,7 +403,7 @@ launchctl list | grep ai.workforce.unified
 
 ---
 
-## 3. 公网验证（12 项全跑）
+## 3. 公网验证（12 项全跑，2026-09-13 简化版）
 
 ```bash
 # 1. launchd 守护
@@ -417,16 +417,12 @@ lsof -nP -iTCP:8788 -iTCP:8765 -iTCP:8766 -sTCP:LISTEN 2>/dev/null | grep LISTEN
 curl -sk -o /dev/null -w "  /                  : HTTP %{http_code} %{time_total}s\n" \
   https://workforce.inkpath.cc/
 
-# 4. 单域名 — LiveKit + Pipecat
+# 4. 单域名 — Mac 本地 Agent (LiveKit 模式)
 curl -sk -o /dev/null -w "  /?mode=livekit     : HTTP %{http_code} %{time_total}s\n" \
   "https://workforce.inkpath.cc/?mode=livekit"
 
-# 4b. 单域名 — local agent
-curl -sk -o /dev/null -w "  /?mode=livekit&ui=local : HTTP %{http_code} %{time_total}s\n" \
-  "https://workforce.inkpath.cc/?mode=livekit&ui=local"
-
-# 4c. /livekit.html 显式入口
-curl -sk -o /dev/null -w "  /livekit.html      : HTTP %{http_code} %{time_total}s\n" \
+# 4b. /livekit.html 应该 404（已删 — 2026-09-13）
+curl -sk -o /dev/null -w "  /livekit.html      : HTTP %{http_code} (期望 404)\n" \
   https://workforce.inkpath.cc/livekit.html
 
 # 5. /api/config 模式分发
@@ -442,34 +438,56 @@ import sys, json
 d = json.load(sys.stdin)['data']
 assert d['livekitUrl'].startswith('wss://') and '.livekit.cloud' in d['livekitUrl'], d['livekitUrl']
 assert d['hasLiveKitCredentials'], 'no LIVEKIT_API_KEY/SECRET'
+assert d['uiMode'] == 'localAgent', f'expected localAgent, got {d[\"uiMode\"]}'
 print('  ✓ mode=livekit :', d['livekitUrl'])
+print('  ✓ uiMode      :', d['uiMode'])
 print('  ✓ pipeline    :', d['sttBackend'], '/', d['llmBackend'], '/', d['ttsBackend'])
 "
 
-# 6. Bot 拉起 (local agent 路径)
-curl -sk "https://workforce.inkpath.cc/api/agent/wake?room=voicechat-compare"
-# 期望: status=success, status=running, pid=N
-
-# 7. LiveKit token (compare 模式,触发完整 STT+LLM+TTS 加载)
+# 6. Local agent wake（lazy spawn via /api/livekit/token）
 curl -sk "https://workforce.inkpath.cc/api/livekit/token?room=voicechat-compare&participant=smoke" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 data = d['data']
 assert 'token' in data and len(data['token']) > 50, 'no token'
 print('  ✓ token len=', len(data['token']), 'url=', data['url'])
+print('  ✓ uiMode=', data['uiMode'], 'agentIdentity=', data['agentIdentity'])
+print('  ✓ bot status=', data['bot']['status'], 'pid=', data['bot'].get('pid'))
 "
 
-# 8. Legacy fallback (workforce-l 仍工作)
-curl -sk -o /dev/null -w "  workforce-l.inkpath.cc : HTTP %{http_code} %{time_total}s\n" \
-  https://workforce-l.inkpath.cc/
+# 7. 验证 LiveKit Cloud 房间真有 agent（不是 Popen 误报）
+sleep 5  # 给 pipecat_agent.py 几秒钟 join room
+python3 <<'PYEOF'
+import asyncio, os
+from livekit.api import LiveKitAPI, ListParticipantsRequest
+async def main():
+    url = os.environ['LIVEKIT_URL'].replace('wss://', 'https://')
+    api = LiveKitAPI(url, os.environ['LIVEKIT_API_KEY'], os.environ['LIVEKIT_API_SECRET'])
+    try:
+        resp = await api.room.list_participants(ListParticipantsRequest(room='voicechat-compare'))
+        agent = next((p for p in resp.participants if p.identity == 'Pipecat Local Agent' and p.state == 2), None)
+        assert agent, f'no agent in room: {[(p.identity, p.state) for p in resp.participants]}'
+        print(f'  ✓ LiveKit room voicechat-compare: {len(resp.participants)} participants, agent ACTIVE')
+    finally:
+        await api.aclose()
+asyncio.run(main())
+PYEOF
 
-# 9. Static 资源
+# 8. Legacy fallback (workforce-l 仍工作，作为应急回滚入口)
+curl -sk -o /dev/null -w "  workforce-l.inkpath.cc : HTTP %{http_code} %{time_total}s\n" \
+  https://workforce-l.inkpath.cc/ 2>/dev/null || echo "  (legacy 8766 offline — 仍 OK)"
+
+# 9. Static 资源（注意 ?v=N 是 CF cache 戳，详见 §6.2）
 for url in /static/styles.css /static/app.js /shared/mode-switcher.js \
-           /livekit-static/livekit-app.js /livekit-static/livekit-styles.css; do
+           /static/livekit-bridge.js; do
   curl -sk -o /dev/null -w "  $url : HTTP %{http_code}\n" "https://workforce.inkpath.cc$url"
 done
 
-# 10. WebSocket /ws 真实接通 Qwen Realtime 云
+# 10. /livekit-static/* 应该 404（已删 — 2026-09-13）
+curl -sk -o /dev/null -w "  /livekit-static/livekit-app.js : HTTP %{http_code} (期望 404)\n" \
+  https://workforce.inkpath.cc/livekit-static/livekit-app.js
+
+# 11. WebSocket /ws 真实接通 Qwen Realtime 云
 python3 - <<'PYEOF'
 import asyncio, json, websockets
 async def main():
@@ -482,7 +500,8 @@ async def main():
 asyncio.run(main())
 PYEOF
 
-# 11. KeepAlive 真测试 (在另一窗口跑,见 §2.6)
+# 12. 多轮 UI mock 测试（不依赖麦克风 — 见 §6.7）
+# 这一项在你浏览器侧跑 — 见 §4 mock_bot 流程
 ```
 
 ---
@@ -548,6 +567,22 @@ sudo pmset -a sleep 0
 
 `lsof -nP -iTCP:8787 -sTCP:LISTEN` 如果有 python 进程在 listen（一般是 omni 项目的 `omni.server`），那是另一个项目，**不要 kill**。unified server 必须用 8788 或其他空端口。如果换机器部署，先验证端口空。
 
+### 6.1.1 `livekit-app.js` 必须显式 `?mode=livekit`
+
+**坑过**:livekit.html 引用的 `livekit-app.js` 里 `loadConfig()` 调用 `/api/config` 不带 query,默认走 qwen shape(`{voice, voices, hasKey, hasWorkspaceId}`),没有 `data` 包装也没有 `sttBackend` 字段。`config = body.data` 后所有 `config.sttBackend` 都 undefined,页面立刻报 `连接失败: undefined is not an object (evaluating 'config.sttBackend')`。
+
+**修法**(已加):`loadConfig()` 显式 `fetch('/api/config?mode=livekit${UI_QUERY ? \`&${UI_QUERY}\` : ""}')`。注释里写清楚为什么不能省略,避免后人再改回。
+
+### 6.1.2 CDN 缓存拖老 JS
+
+Cloudflare Tunnel 默认对静态资源 cache 4 小时(`max-age=14400`)。即使 unified server 给 `/livekit-static/livekit-app.js` 设了 `Cache-Control: no-cache`,CF edge 仍可能给走默认策略(尤其是 `cf-cache-status: HIT` 时)。
+
+**两件事**:
+1. **unified_server.py 给 HTML 和 static 加 middleware 注入 `Cache-Control: no-cache`**(`@web.middleware async def _no_cache_for_static` + `def _html_response()`)—— 详见源码
+2. **改 JS/CSS 文件 URL 时 bump query string** —— 例 `?v=2` → `?v=3`。**这是因为 CF 缓存 key 含 query string**,新 key 会 MISS,新内容立刻生效。`livekit.html` 已用 `?v=2`,下次部署时 bump 到 `?v=3`。
+
+**验证方式**:看响应 header 里 `cf-cache-status: MISS` vs `HIT`。HIT 说明 CF 还缓存了老版本。
+
 ### 6.2 CDN 缓存拖旧代码
 
 CF 默认对 `/static/*.js` 缓存 4 小时。代码部署后浏览器还看到旧代码：
@@ -604,7 +639,46 @@ grep -rn "self\.Settings(" web-demo/ 2>/dev/null
 
 如果搜到自定义 STT/LLM/TTS 还在用 `self.Settings(...)`，升级前先批量改成 `STTSettings(...)` / `LLMSettings(...)` / `TTSSettings(...)`。完整修复记录见 [`docs/pr-pipecat-1.9-settings-compat.md`](./pr-pipecat-1.9-settings-compat.md)。
 
-### 6.7 双 tunnel / 双进程抢端口
+### 6.7 多轮 UI mock 测试（不依赖麦克风）
+
+**症状**：浏览器在 Browserbase headless / iOS Safari 上没法测试真麦克风 + SenseVoice STT 链路；想验证 UI 状态机（micBtn 红背景、voiceOrb 显示、bubble 累积）但又得跑全套真 pipeline。
+
+**方案**：`~/work/projects/_test-fixtures/livekit-mock-bot/mock_bot.py` 直接连 LiveKit Cloud 房间，以 `Pipecat Local Agent` identity 发 transcript JSON frames——**跟真 pipecat_agent.py / transcript_bridge.py 用的 schema 完全一致**。浏览器收到同样的 data channel payload，跑同样的 `onDataReceived` handler。
+
+```bash
+# 在 Mac 上跑（不需要改任何源码）
+cd ~/work/projects/workforce/web-demo/pipecat-livekit
+set -a && source /Users/admin/work/projects/workforce/.env && set +a
+.venv/bin/python /Users/admin/work/projects/_test-fixtures/livekit-mock-bot/mock_bot.py --flow mixed
+
+# 可选 flows: quick (1 turn) | mixed (4 turns, 中英 + 多行) | long (单 turn 长文本)
+# 可选 --delay 2.0  减慢速度（默认 1.0 = 实时节奏）
+# 可选 --no-exit  跑完不进 disconnect
+```
+
+测试时浏览器要打开 `https://workforce.inkpath.cc/?mode=livekit&v=10`，点 "连接并开始"。Browserbase headless 也行（它有 LiveKit client CDN,只是没真麦克风）。
+
+**验证脚本**（在浏览器 console 跑）：
+
+```js
+JSON.stringify({
+  bubbles: Array.from(document.querySelectorAll('.bubble')).map(b => ({
+    role: b.className.replace('bubble ', '').trim(),
+    text: b.querySelector('.bubble-text').textContent
+  })),
+  micBtnClasses: Array.from(document.getElementById('micBtn').classList),
+  orbDisplay: getComputedStyle(document.getElementById('voiceOrbContainer')).display
+}, null, 2)
+```
+
+**2026-09-13 实测**：13 帧 mixed → 8 个 bubble，字符级一致无丢字。micBtn 加 `.active` 类（红背景），voiceOrb `display: flex`。
+
+**注意事项**：
+- mock_bot 用真 `Pipecat Local Agent` identity —— 跟真 pipecat_agent.py 互踢，**同一时间只能有一个**。
+- 要测真 agent 时先让 mock_bot 退出，再 wake agent。
+- mock_bot 的 transcript frames 跟 schema 完全兼容 —— 不需要改前端代码。
+
+### 6.8 双 tunnel / 双进程抢端口
 
 **症状**：`lsof -nP -iTCP:8788` 看有两个进程（或一个 LaunchAgent 一个手工 `terminal(background=true)`），公网 502/503 随机。
 

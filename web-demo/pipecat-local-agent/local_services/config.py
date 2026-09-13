@@ -95,7 +95,7 @@ class LocalAgentConfig:
             tts_backend=_env("LOCAL_TTS_BACKEND", "qwen3_tts").lower(),
             tts_model=_env("LOCAL_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"),
             tts_device=_env("LOCAL_TTS_DEVICE", "mps"),
-            tts_voice=_env("LOCAL_TTS_VOICE", "Cherry"),
+            tts_voice=_env("LOCAL_TTS_VOICE", "vivian"),
             tts_sample_rate=int(_env("LOCAL_TTS_SAMPLE_RATE", "24000")),
             memory_enabled=_env_bool("LOCAL_MEMORY_ENABLED", True),
             lancedb_path=_env("LANCEDB_PATH", str(BASE_DIR / "data" / "lancedb")),
