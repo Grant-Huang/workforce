@@ -205,9 +205,56 @@
         }
       });
       room.on(RoomEvent.Disconnected, () => {
+        // Tear down the audio sink so we don't keep playing after disconnect.
+        const sink = document.getElementById("livekit-agent-audio");
+        if (sink) { sink.srcObject = null; sink.remove(); }
         setStatus("未连接");
         setMicIcon("idle");
       });
+      // --- Audio playback ---
+      // The agent's TTS audio arrives as a remote audio track published by
+      // the Pipecat bot's LiveKitTransport.output(). livekit-client v2
+      // exposes it via RoomEvent.TrackSubscribed; we have to attach it to
+      // an <audio> element ourselves. Without this, the browser sees the
+      // transcript (data channel) but hears nothing.
+      function attachAgentAudioTrack(track) {
+        if (!track || track.kind !== "audio") return;
+        let sink = document.getElementById("livekit-agent-audio");
+        if (!sink) {
+          sink = document.createElement("audio");
+          sink.id = "livekit-agent-audio";
+          sink.autoplay = true;
+          // iOS Safari requires this for programmatic playback to start.
+          sink.setAttribute("playsinline", "");
+          document.body.appendChild(sink);
+        }
+        track.attach(sink);
+        // Some browsers leave audio paused if the gesture that started the
+        // session was a long time ago. Calling play() re-asserts.
+        sink.play().catch((e) => console.warn("audio.play() failed:", e?.message || e));
+        setStatus("本地 agent 已就绪，可以说话");
+      }
+      room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+        if (participant.identity !== livekitConfig.agentIdentity) return;
+        attachAgentAudioTrack(track);
+      });
+      room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+        if (participant.identity !== livekitConfig.agentIdentity) return;
+        const sink = document.getElementById("livekit-agent-audio");
+        if (sink) track.detach(sink);
+      });
+      // Some LiveKit clients deliver the subscribed track on the participant
+      // object directly when we connect after the bot already joined; pull
+      // any existing tracks off the bot participant on first sight.
+      function attachExistingAudioTracks(p) {
+        if (p.identity !== livekitConfig.agentIdentity) return;
+        for (const pub of p.trackPublications.values()) {
+          if (pub.track && pub.track.kind === "audio") {
+            attachAgentAudioTrack(pub.track);
+          }
+        }
+      }
+      room.on(RoomEvent.ParticipantConnected, attachExistingAudioTracks);
       room.on(RoomEvent.ConnectionStateChanged, (state) => {
         if (state === ConnectionState.Connecting) setStatus("连接中…");
         if (state === ConnectionState.Connected) {
