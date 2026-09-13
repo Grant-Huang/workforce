@@ -228,15 +228,29 @@ class DashScopeTTSV2Service(TTSService):
 class _QwenRealtimeCollector(QwenTtsRealtimeCallback):
     def __init__(self):
         self.audio_chunks: list[bytes] = []
-        self.done = threading.Event()
+        # Two independent "done" signals so we don't exit before audio arrives:
+        #   - self.audio_done: set when server says "response.audio.done"
+        #     (the audio stream has been fully delivered)
+        #   - self.session_done: set when server says "response.done" /
+        #     "session.finished" / socket closes
+        # ``run_tts`` waits for audio_done FIRST, then for session_done with a
+        # short grace period. Without this split, on_close fires almost
+        # immediately after finish() on some server commits and we return
+        # before any audio chunks have arrived — the user hears silence.
+        self.audio_done = threading.Event()
+        self.session_done = threading.Event()
         self.error: Exception | None = None
+        self.error_msg: dict[str, Any] | None = None
 
     def on_close(self, close_status_code, close_msg) -> None:
-        self.done.set()
+        # Socket closed — mark session done. Don't trust this as the audio
+        # boundary; it's only the "I have nothing more to send" signal.
+        self.session_done.set()
 
     def on_event(self, message: dict[str, Any]) -> None:
         try:
-            if message.get("type") == "response.audio.delta":
+            t = message.get("type")
+            if t == "response.audio.delta":
                 audio = (
                     message.get("delta")
                     or message.get("audio")
@@ -246,11 +260,20 @@ class _QwenRealtimeCollector(QwenTtsRealtimeCallback):
                 chunk = base64.b64decode(audio) if audio else b""
                 if chunk:
                     self.audio_chunks.append(chunk)
-            elif message.get("type") in {"response.done", "session.finished"}:
-                self.done.set()
+            elif t == "response.audio.done":
+                # Server explicitly says audio stream finished. This is the
+                # reliable "no more chunks coming" signal we should wait for.
+                self.audio_done.set()
+            elif t in {"response.done", "session.finished"}:
+                self.session_done.set()
+            elif t == "error":
+                self.error_msg = message
+                self.audio_done.set()  # unblock waiters on error too
+                self.session_done.set()
         except Exception as e:
             self.error = e
-            self.done.set()
+            self.audio_done.set()
+            self.session_done.set()
 
 
 @dataclass
@@ -323,10 +346,21 @@ class DashScopeQwenRealtimeTTSService(TTSService):
             )
             realtime.append_text(text)
             realtime.finish()
-            if not collector.done.wait(timeout=30.0):
-                raise TimeoutError("Timed out waiting for DashScope Qwen realtime TTS")
-            if collector.error:
-                raise collector.error
+            # Wait in two stages. First, block until server signals the audio
+            # stream is done (``response.audio.done``). Then a short grace
+            # period for the socket to close cleanly. Without this split,
+            # on_close fires almost immediately after finish() on some
+            # server commits and we return before any audio chunks arrive
+            # — the user hears silence.
+            if not collector.audio_done.wait(timeout=30.0):
+                raise TimeoutError("Timed out waiting for Qwen realtime TTS audio")
+            # Give the websocket a brief window to deliver any tail chunks.
+            collector.session_done.wait(timeout=2.0)
+            if collector.error_msg:
+                # Surface server-reported error to caller
+                code = collector.error_msg.get("error", {}).get("code", "unknown")
+                msg = collector.error_msg.get("error", {}).get("message", "")
+                raise RuntimeError(f"Qwen realtime TTS error {code}: {msg}")
             return b"".join(collector.audio_chunks)
         finally:
             try:
