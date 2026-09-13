@@ -38,11 +38,20 @@ HOST = os.environ.get("PIPECAT_HOST", os.environ.get("HOST", "127.0.0.1"))
 PORT = int(os.environ.get("PIPECAT_PORT", "8766"))
 
 LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "ws://127.0.0.1:7880")
+# When the browser reaches this server via a public hostname (e.g. CF Tunnel),
+# the token's `url` must be a hostname the browser can reach. Set in .env for
+# public exposure; leave empty to fall back to LIVEKIT_URL (local/LAN only).
+LIVEKIT_URL_PUBLIC = os.environ.get("LIVEKIT_URL_PUBLIC", "").strip()
 LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
 DEFAULT_ROOM = os.environ.get("LIVEKIT_ROOM_NAME", "voicechat-compare")
 AGENT_IDENTITY = os.environ.get("LIVEKIT_AGENT_IDENTITY", "Pipecat Local Agent")
 UI_MODE_ENV = os.environ.get("PIPECAT_UI_MODE", "").strip().lower()
+
+
+def _token_url() -> str:
+    """URL the browser should use to reach the LiveKit SFU."""
+    return LIVEKIT_URL_PUBLIC or LIVEKIT_URL
 
 
 def _query_ui_mode(request: web.Request) -> str:
@@ -72,7 +81,7 @@ async def config(request):
     is_local = ui_mode == "localAgent"
     data = {
         "uiMode": ui_mode,
-        "livekitUrl": LIVEKIT_URL,
+        "livekitUrl": _token_url(),
         "defaultRoom": _default_room(request),
         "agentIdentity": AGENT_IDENTITY if is_local else "Pipecat Agent",
         "autoSpawnBot": not is_local,
@@ -114,7 +123,7 @@ async def livekit_token(request):
 
     payload = {
         "token": token,
-        "url": LIVEKIT_URL,
+        "url": _token_url(),
         "room": room,
         "participant": participant,
         "uiMode": "localAgent" if is_local else "compare",
