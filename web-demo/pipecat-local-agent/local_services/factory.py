@@ -38,14 +38,44 @@ def build_tts(config: LocalAgentConfig):
     if backend in ("qwen3_tts", "qwen_tts", "local"):
         return QwenLocalTTSService(config)
     if backend == "dashscope":
-        from dashscope_services import DashScopeTTSV2Service
-
         if not config.dashscope_api_key:
             raise ValueError("LOCAL_TTS_BACKEND=dashscope requires QWEN_API_KEY")
-        logger.info(f"TTS backend=dashscope model={config.tts_model} voice={config.tts_voice}")
+        # Two TTS service classes coexist:
+        #   - DashScopeTTSV2Service: synchronous HTTP, used by cosyvoice-v1/v2/v3
+        #     (Alibaba CosyVoice models). Returns one PCM blob per call.
+        #   - DashScopeQwenRealtimeTTSService: streaming websocket, used by
+        #     qwen-tts / qwen3-tts-flash-realtime / qwen3-tts-vd-realtime
+        #     (Qwen TTS models). Streams chunks and accepts Qwen voice names
+        #     like Jennifer / Cherry / Ethan / Vivian.
+        # Model names that contain "-realtime" or start with "qwen-tts" go to
+        # the realtime service; everything else (cosyvoice-*, sambert, ...)
+        # goes to V2.
+        model = config.tts_model or ""
+        is_realtime = (
+            "realtime" in model.lower()
+            or model.lower().startswith("qwen-tts")
+            or model.lower().startswith("qwen3-tts")
+        )
+        if is_realtime:
+            from dashscope_services import DashScopeQwenRealtimeTTSService
+            logger.info(
+                f"TTS backend=dashscope model={model} voice={config.tts_voice} "
+                f"(Qwen realtime websocket protocol)"
+            )
+            return DashScopeQwenRealtimeTTSService(
+                api_key=config.dashscope_api_key,
+                model=model,
+                voice=config.tts_voice,
+                sample_rate=config.tts_sample_rate,
+            )
+        from dashscope_services import DashScopeTTSV2Service
+        logger.info(
+            f"TTS backend=dashscope model={model} voice={config.tts_voice} "
+            f"(HTTP tts_v2 protocol)"
+        )
         return DashScopeTTSV2Service(
             api_key=config.dashscope_api_key,
-            model=config.tts_model or "cosyvoice-v3-flash",
+            model=model or "cosyvoice-v1",
             voice=config.tts_voice,
             sample_rate=config.tts_sample_rate,
         )
