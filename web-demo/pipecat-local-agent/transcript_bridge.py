@@ -74,6 +74,48 @@ def _sanitize_assistant_text(text: str) -> str:
     return cleaned.strip()
 
 
+# FunASR SenseVoice (with use_itn=True) prefixes its transcription with a
+# sequence of metadata tags wrapped in angle brackets:
+#   ``<|zh|><|NEUTRAL|><|Speech|><|withitn|>actual spoken text``
+# where the tag set is roughly:
+#   <|{lang}|>            language tag — zh/en/ja/yue/ko/nospeech
+#   <|{emotion}|>         emotion — NEUTRAL/HAPPY/ANGRY/SAD/SURPRISED/FEARFUL/DISGUSTED
+#   <|{event}|>           acoustic event — Speech/Music/Laughter/Cry/...
+#   <|{withitn|noitn}|>   inverse-text-normalization flag
+# These tags are noise for downstream display — strip them.
+#
+# We use a single generous regex matching any well-formed ``<|...|>`` token
+# from the FunASR vocabulary rather than enumerating every combination,
+# because SenseVoice occasionally emits tags in a different order or with
+# extra whitespace, and the set of tag values is not formally versioned.
+_FUNASR_TAG_RE = re.compile(
+    r"<\|"
+    r"(?:zh|en|ja|yue|ko|nospeech"         # language
+    r"|NEUTRAL|HAPPY|ANGRY|SAD|SURPRISED|FEARFUL|DISGUSTED"  # emotion
+    r"|Speech|Music|Laughter|Cry|Applause|Silence"          # event
+    r"|withitn|noitn"                                          # itn flag
+    r")"
+    r"\|>"
+)
+# Defensive catch-all for any remaining angle-bracket tag we didn't enumerate
+# (e.g. a future SenseVoice version adds a new tag value).
+_LEFTOVER_TAG_RE = re.compile(r"<\|[^>]{1,40}\|>")
+
+
+def _sanitize_user_text(text: str) -> str:
+    """Strip FunASR SenseVoice metadata tags from user transcription.
+
+    SenseVoice with ``use_itn=True`` returns text like
+    ``<|zh|><|NEUTRAL|><|Speech|><|withitn|>你好``. The tags are useful for
+    downstream tooling but not for showing to the user — strip them.
+    """
+    if not text:
+        return ""
+    cleaned = _FUNASR_TAG_RE.sub("", text)
+    cleaned = _LEFTOVER_TAG_RE.sub("", cleaned)
+    return cleaned.strip()
+
+
 class TranscriptBridge(FrameProcessor):
     """Emit user/assistant transcript events to the LiveKit client.
 
@@ -90,8 +132,13 @@ class TranscriptBridge(FrameProcessor):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, TranscriptionFrame):
+            # FunASR SenseVoice (with use_itn=True) prefixes the
+            # transcription with metadata tags like ``<|zh|><|NEUTRAL|>``
+            # ``<|Speech|><|withitn|>``. Strip them so the bubble shows just
+            # the spoken text. Without this the user sees literal tag soup.
+            cleaned_text = _sanitize_user_text(frame.text)
             payload = json.dumps(
-                {"type": "transcript", "role": "user", "text": frame.text},
+                {"type": "transcript", "role": "user", "text": cleaned_text},
                 ensure_ascii=False,
             )
             await self.push_frame(OutputTransportMessageFrame(message=payload), direction)

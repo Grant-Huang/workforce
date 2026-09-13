@@ -92,7 +92,14 @@ def _wake_authorized(request: web.Request) -> bool:
 
 
 async def index(_request):
-    return web.FileResponse(BASE_DIR / "livekit.html")
+    # livekit.html was removed in 58a89fb; this server is only kept alive
+    # because launchd manages it and unified_server imports its
+    # bot_manager. Return a tiny stub so anyone hitting :8766 directly
+    # gets an explanatory message instead of a 500 from missing file.
+    return web.Response(
+        text="This port is internal — LiveKit UI is served from 8788 via unified_server.\n",
+        content_type="text/plain",
+    )
 
 
 async def config(request):
@@ -196,9 +203,14 @@ app.router.add_get("/api/agent/wake", agent_wake)
 app.router.add_post("/api/agent/wake", agent_wake)
 app.router.add_get("/api/livekit/token", livekit_token)
 app.router.add_get("/shared/mode-switcher.js", shared_mode_switcher)
-# livekit.html uses /livekit-static/* (unified server namespace); keep /static/ as alias.
-app.router.add_static("/livekit-static/", BASE_DIR / "static")
-app.router.add_static("/static/", BASE_DIR / "static")
+# Note: the livekit.html + static/ directory this server used to serve are
+# gone as of commit 58a89fb ("Simplify unified server: collapse 3 pills into
+# 2, reuse Qwen UI for LiveKit mode") — the unified server (port 8788) is
+# now the only public-facing HTTP entry. Kept this 8766 server around only
+# because launchd (ai.workforce.pipecat-livekit plist) still manages its
+# subprocess lifecycle and that infra is wired into the bot_manager import
+# in unified_server. If the static references below aren't removed, this
+# server crashes on startup and launchd loops forever every 10s.
 
 if __name__ == "__main__":
     print(f"LiveKit UI: http://{HOST}:{PORT}/")
