@@ -137,8 +137,16 @@ async def entrypoint(room_url: str, token: str, room_name: str, config: LocalAge
     async def on_disconnected(_transport):
         logger.warning("LiveKit transport disconnected — agent will exit or reconnect per LIVEKIT_AUTO_RECONNECT")
 
-    @transport.event_handler("on_first_participant_joined")
-    async def on_first_participant_joined(_transport, participant_id):
+    # Use on_participant_connected (fires for every new join) instead of
+    # on_first_participant_joined (fires once). Fixes: opening the page hours
+    # later still plays the welcome TTS, and reconnects after a network blip
+    # also replay it. Filter out the agent's own identity (in case LiveKit
+    # surfaces its own join event).
+    @transport.event_handler("on_participant_connected")
+    async def on_participant_connected(_transport, participant_id):
+        own_identity = os.environ.get("LIVEKIT_AGENT_IDENTITY", "Pipecat Local Agent")
+        if participant_id == own_identity:
+            return
         logger.info(f"Participant joined: {participant_id}")
         await asyncio.sleep(0.5)
         await worker.queue_frame(

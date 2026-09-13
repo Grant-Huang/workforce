@@ -60,6 +60,17 @@
       return;
     }
 
+    // Replace-in-place: end-of-response cleanup overwrites the streaming
+    // bubble with the sanitized final text. Without this, the Qwen 2.5
+    // occasional leaked ``<|im_end|>`` / ``system\n`` / stray `` would
+    // stay visible in the transcript even though the agent moved on.
+    if (role === "assistant" && assistantBubble) {
+      const span = assistantBubble.querySelector(".bubble-text");
+      if (span) span.textContent = text;
+      chatEl.scrollTop = chatEl.scrollHeight;
+      return;
+    }
+
     const bubble = document.createElement("div");
     bubble.className = `bubble ${role}`;
     const roleEl = document.createElement("span");
