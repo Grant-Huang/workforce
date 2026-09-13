@@ -40,6 +40,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.runner.livekit import configure_with_args, generate_token_with_agent
 from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
 from pipecat.workers.runner import WorkerRunner
+from livekit import rtc  # noqa: E402  — used by audio-codec monkey-patch below
 
 from local_services.config import LocalAgentConfig
 from local_services.factory import build_pipeline_services
@@ -47,6 +48,72 @@ from transcript_bridge import TranscriptBridge
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR.parent.parent / ".env")
+
+
+# --- Audio codec fix (see commit message) ---
+# LiveKit Python SDK's TrackPublishOptions() defaults to RED (RFC 2198)
+# codec for loss resilience. LiveKit Cloud's SFU can transcode RED to OPUS
+# for browser subscribers, but in practice the published mime reports as
+# "audio/red" and browsers (Chrome / Firefox / Safari) don't natively decode
+# RED — the audio track arrives but playback is silent.
+#
+# ``LiveKitParams`` doesn't expose a codec knob, so the cleanest fix without
+# patching the venv-installed ``pipecat`` source is to wrap
+# ``LiveKitTransportClient.connect`` so that after the original connect
+# succeeds we unpublish the default-RED track and re-publish it with RED
+# disabled. The patch is applied once at module import time so the same
+# process can reconnect without re-applying.
+def _patch_livekit_audio_codec():
+    """Force ``LiveKitTransportClient`` to publish audio as OPUS (no RED)."""
+    try:
+        from pipecat.transports.livekit.transport import LiveKitTransportClient
+    except ImportError:
+        return  # Pipecat version too old — nothing to patch.
+
+    if getattr(LiveKitTransportClient, "_audio_codec_patched", False):
+        return
+
+    _orig_connect = LiveKitTransportClient.connect
+
+    async def connect(self):  # type: ignore[no-redef]
+        await _orig_connect(self)
+        if getattr(self, "_force_opus_applied", False):
+            return
+        try:
+            # Unpublish the default RED-codec track created inside connect().
+            if self._audio_track is not None:
+                try:
+                    await self.room.local_participant.unpublish_track(self._audio_track.sid)
+                except Exception:
+                    pass  # best-effort
+            # Create a fresh source + track pinned to OPUS.
+            self._audio_source = rtc.AudioSource(
+                self._out_sample_rate, self._params.audio_out_channels
+            )
+            self._audio_track = rtc.LocalAudioTrack.create_audio_track(
+                "pipecat-audio", self._audio_source
+            )
+            opts = rtc.TrackPublishOptions()
+            opts.source = rtc.TrackSource.SOURCE_MICROPHONE
+            # The LiveKit protobuf TrackPublishOptions exposes a ``red``
+            # boolean (field 5). Default is True — meaning the publisher is
+            # willing to use RED. The SFU normally negotiates to OPUS when
+            # the subscriber can't decode RED, but in practice the published
+            # mime reports as "audio/red" and the browser side sometimes
+            # fails to decode. Force RED off so we always publish native
+            # OPUS frames the browser can decode directly.
+            opts.red = False
+            await self.room.local_participant.publish_track(self._audio_track, opts)
+            self._force_opus_applied = True
+            logger.info("LiveKit audio re-published with red=False (native OPUS)")
+        except Exception as exc:
+            logger.warning(f"audio codec patch failed, falling back to default: {exc}")
+
+    LiveKitTransportClient.connect = connect
+    LiveKitTransportClient._audio_codec_patched = True
+
+
+_patch_livekit_audio_codec()
 
 
 def resolve_livekit_credentials(config: LocalAgentConfig, room_name: str | None):
