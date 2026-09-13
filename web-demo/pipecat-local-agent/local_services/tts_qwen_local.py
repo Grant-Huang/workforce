@@ -8,6 +8,7 @@ from typing import Any
 from loguru import logger
 
 from pipecat.frames.frames import ErrorFrame, TTSAudioRawFrame
+from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TTSService
 from pipecat.utils.tracing.service_decorators import traced_tts
 
@@ -22,11 +23,14 @@ class QwenLocalTTSService(TTSService):
     """
 
     def __init__(self, config: LocalAgentConfig, **kwargs: Any) -> None:
+        # pipecat 1.9: settings moved to pipecat.services.settings.TTSSettings.
+        # Earlier (<1.9) this used `self.Settings(...)` (a per-class inner dataclass
+        # on TTSService); that attribute no longer exists in 1.9.
         super().__init__(
             sample_rate=config.tts_sample_rate,
             push_start_frame=True,
             push_stop_frames=True,
-            settings=self.Settings(model=config.tts_model, voice=config.tts_voice, language=None),
+            settings=TTSSettings(model=config.tts_model, voice=config.tts_voice, language=None),
             **kwargs,
         )
         self._config = config

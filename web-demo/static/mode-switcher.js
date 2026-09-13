@@ -1,25 +1,32 @@
-/** Shared pill switcher: Qwen Realtime (8765), LiveKit + Pipecat (8766), Mac local agent (8766?ui=local). */
+/** Shared pill switcher for the unified `workforce.inkpath.cc` server (port 8787).
+ *
+ * Single-domain mode dispatch — toggles `?mode=` query instead of cross-domain nav,
+ * so the audio session (WebSocket for Qwen Realtime / LiveKit room for Pipecat)
+ * tears down gracefully via `onBeforeLeave` and the new mode spins up in the same tab.
+ *
+ * Three modes:
+ *   qwen       — Qwen3.5-Omni-Realtime cloud WebSocket (default)
+ *   livekit    — LiveKit Cloud + Mac Pipecat bot (compare mode)
+ *   localAgent — LiveKit Cloud + Mac Pipecat bot, manual agent control (?ui=local)
+ */
 (function () {
+  function targetFor(mode) {
+    if (mode === "qwen") return "/";
+    if (mode === "livekit") return "/?mode=livekit";
+    if (mode === "localAgent") return "/?mode=livekit&ui=local";
+    return "/";
+  }
+
   const MODES = {
-    qwen: {
-      label: "Qwen Realtime",
-      url: "http://127.0.0.1:8765/",
-    },
-    livekit: {
-      label: "LiveKit + Pipecat",
-      url: "http://127.0.0.1:8766/",
-    },
-    localAgent: {
-      label: "Mac 本地 Agent",
-      url: "http://127.0.0.1:8766/?ui=local",
-    },
+    qwen: { label: "Qwen Realtime", url: targetFor("qwen") },
+    livekit: { label: "LiveKit + Pipecat", url: targetFor("livekit") },
+    localAgent: { label: "Mac 本地 Agent", url: targetFor("localAgent") },
   };
 
   function detectCurrentMode() {
-    const port = location.port;
     const params = new URLSearchParams(location.search);
-    if (port === "8766" && params.get("ui") === "local") return "localAgent";
-    if (port === "8766") return "livekit";
+    if (params.get("mode") === "livekit" && params.get("ui") === "local") return "localAgent";
+    if (params.get("mode") === "livekit") return "livekit";
     return "qwen";
   }
 
@@ -45,8 +52,14 @@
         const target = btn.dataset.mode;
         if (target === activeMode) return;
         if (typeof onBeforeLeave === "function") {
-          await onBeforeLeave(target);
+          try {
+            await onBeforeLeave(target);
+          } catch (e) {
+            console.warn("onBeforeLeave failed, navigating anyway:", e);
+          }
         }
+        // In-page navigation (single-domain, no cross-origin) — preserves document.cookie
+        // and sessionStorage, just reloads the right mode page.
         location.href = MODES[target].url;
       });
     });

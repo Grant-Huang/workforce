@@ -196,6 +196,8 @@ app.router.add_get("/api/agent/wake", agent_wake)
 app.router.add_post("/api/agent/wake", agent_wake)
 app.router.add_get("/api/livekit/token", livekit_token)
 app.router.add_get("/shared/mode-switcher.js", shared_mode_switcher)
+# livekit.html uses /livekit-static/* (unified server namespace); keep /static/ as alias.
+app.router.add_static("/livekit-static/", BASE_DIR / "static")
 app.router.add_static("/static/", BASE_DIR / "static")
 
 if __name__ == "__main__":

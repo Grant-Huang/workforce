@@ -11,6 +11,7 @@ from typing import Any
 from loguru import logger
 
 from pipecat.frames.frames import ErrorFrame, TranscriptionFrame
+from pipecat.services.settings import STTSettings
 from pipecat.services.stt_service import SegmentedSTTService
 from pipecat.utils.time import time_now_iso8601
 from pipecat.utils.tracing.service_decorators import traced_stt
@@ -22,7 +23,13 @@ class SenseVoiceSTTService(SegmentedSTTService):
     """Segmented STT using FunASR SenseVoice on local GPU (MPS/CUDA/CPU)."""
 
     def __init__(self, config: LocalAgentConfig, **kwargs: Any) -> None:
-        super().__init__(settings=self.Settings(model=config.stt_model), **kwargs)
+        # pipecat 1.9: settings moved to pipecat.services.settings.STTSettings.
+        # Earlier (<1.9) this used `self.Settings(model=...)` (a per-class inner
+        # dataclass on SegmentedSTTService); that attribute no longer exists in 1.9.
+        super().__init__(
+            settings=STTSettings(model=config.stt_model, language=config.stt_language),
+            **kwargs,
+        )
         self._config = config
         self._model = None
 

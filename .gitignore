@@ -18,3 +18,7 @@ DerivedData/
 __pycache__/
 *.pyc
 .venv/
+
+## macOS LaunchAgent wrapper scripts (per-host, hold .env source path;
+## deploy scripts live at .launchd-wrappers/start-{8765,8766}.sh, never commit)
+.launchd-wrappers/
