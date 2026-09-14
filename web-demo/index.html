@@ -9,12 +9,9 @@
 <body>
   <div class="app">
     <header class="topbar">
-      <div id="modeSwitcher" class="modeSwitcherHost"></div>
-      <div class="topbarRight">
-        <button type="button" id="tuningToggle" class="tuningToggle" aria-label="调参" title="调参">⚙</button>
-        <select id="voiceSelect" class="voiceSelect" aria-label="选择音色" title="选择音色"></select>
-        <span class="status" id="status">未连接</span>
-      </div>
+      <button type="button" id="tuningToggle" class="tuningToggle" aria-label="调参" title="调参">⚙</button>
+      <select id="voiceSelect" class="voiceSelect" aria-label="选择音色" title="选择音色"></select>
+      <span class="status" id="status">未连接</span>
     </header>
 
     <!-- 调参面板：VAD threshold / silence_duration_ms / 播放淡入淡出时长，本地留存，下次开始
@@ -113,9 +110,6 @@
   <script src="/static/agentnexus.js"></script>
   <script src="/static/saveIntent.js"></script>
   <script src="/static/memoryExtraction.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
-  <script src="/shared/mode-switcher.js?v=10"></script>
-  <script src="/static/app.js?v=10"></script>
-  <script src="/static/livekit-bridge.js?v=10"></script>
+  <script src="/static/app.js"></script>
 </body>
 </html>

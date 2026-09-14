@@ -1028,10 +1028,6 @@ function stop(reason) {
 }
 
 micBtn.addEventListener("click", () => {
-  // LiveKit mode: livekit-bridge.js owns micBtn — its own listener below runs
-  // first (registered earlier in the file via the same handler). Bail out here
-  // so Qwen's start()/stop() doesn't fight it.
-  if (new URLSearchParams(location.search).get("mode") === "livekit") return;
   if (state === STATE.IDLE) {
     // An idle-but-connected text session no longer blocks starting voice (see
     // renderDictationUI's comment) -- close it first, silently (this is a deliberate
@@ -1724,21 +1720,6 @@ tuningPanel.addEventListener("click", (event) => {
 
 renderSuggestions();
 setState(STATE.IDLE);
-
-if (window.VoiceModeSwitcher) {
-  const mode = new URLSearchParams(location.search).get("mode") === "livekit"
-    ? "localAgent"
-    : "qwen";
-  VoiceModeSwitcher.mountSwitcher(document.getElementById("modeSwitcher"), {
-    currentMode: mode,
-    onBeforeLeave: async () => {
-      stopAllSessions();
-      // LiveKit bridge cleanup
-      const bridge = window.__livekitBridge;
-      if (bridge) await bridge.disconnect();
-    },
-  });
-}
 
 // Refresh the local memory cache when the tab regains focus, on top of the existing
 // pull-on-conversation-start -- covers "memory changed on another device/tab while this

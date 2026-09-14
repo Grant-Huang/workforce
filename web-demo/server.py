@@ -44,6 +44,7 @@ QWEN_MODEL = os.environ.get("QWEN_MODEL", "qwen3.5-omni-flash-realtime")
 QWEN_VOICE = os.environ.get("QWEN_VOICE", "Jennifer")
 
 HOST = os.environ.get("HOST", "127.0.0.1")
+PORT = int(os.environ.get("PORT", os.environ.get("UNIFIED_PORT", "8765")))
 PRODUCTION = os.environ.get("PRODUCTION", "").lower() in ("1", "true", "yes")
 
 # Switched to this shortlist (2026-08-28) -- full list of ~47 voices Qwen3.5-Omni-Realtime
@@ -279,5 +280,5 @@ if __name__ == "__main__":
         print("AgentNexus mock: disabled (PRODUCTION=1)")
     else:
         print("AgentNexus mock: /agentnexus-mock/* (see agentnexus_mock.py)")
-    print(f"Listening on {HOST}:8765")
-    web.run_app(app, host=HOST, port=8765)
+    print(f"Listening on {HOST}:{PORT}")
+    web.run_app(app, host=HOST, port=PORT)
