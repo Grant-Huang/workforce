@@ -318,10 +318,12 @@ class DashScopeQwenRealtimeTTSService(TTSService):
 
     @traced_tts
     async def run_tts(self, text: str, context_id: str):
+        logger.info(f"DashScopeQwenRealtimeTTSService.run_tts CALLED text={text!r} ctx={context_id[:8]}")
         try:
             await self.start_processing_metrics()
             audio = await asyncio.to_thread(self._synthesize, text)
             await self.stop_processing_metrics()
+            logger.info(f"DashScopeQwenRealtimeTTSService._synthesize returned audio_len={len(audio) if audio else 0}")
             if audio:
                 yield TTSAudioRawFrame(
                     audio=audio,
@@ -329,7 +331,10 @@ class DashScopeQwenRealtimeTTSService(TTSService):
                     num_channels=1,
                     context_id=context_id,
                 )
+            else:
+                logger.warning(f"DashScopeQwenRealtimeTTSService: empty audio for ctx={context_id[:8]}, yielding no frame")
         except Exception as e:
+            logger.error(f"DashScopeQwenRealtimeTTSService.run_tts EXCEPTION: {e!r}")
             yield ErrorFrame(error=f"DashScope Qwen realtime TTS error: {e}")
 
     def _synthesize(self, text: str) -> bytes:
