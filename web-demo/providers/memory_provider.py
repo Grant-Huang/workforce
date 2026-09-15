@@ -40,9 +40,19 @@ class MemoryProvider:
         client = agentnexus.get_client()
         # 1) 主动查 AgentNexus（Mock 进程内 / Real HTTP ?q=）
         if isinstance(client, HttpClient):
-            live_entries = await client.search_memory_remote(
-                self.channel_id, query, limit=max_results
-            )
+            # real 模式但 AGENTNEXUS_BASE_URL 未配置（比如只设了 PRODUCTION=1）时，
+            # client.config.base_url 是空串，请求会在 aiohttp 里直接抛
+            # InvalidUrlClientError——这条查询几乎总跟 WebSearch/NexusOps 一起并发跑在
+            # 同一个 asyncio.gather 里（_MEMORY_HINT 里的"我"几乎命中所有自然语句），
+            # 之前这里不兜底会连累整个 context/query 500，包括真正想要的 Tavily 结果。
+            # 降级成"AgentNexus 这次没查到"，不拖累其他 provider。
+            try:
+                live_entries = await client.search_memory_remote(
+                    self.channel_id, query, limit=max_results
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[agentnexus] search_memory_remote 失败（base_url={client.config.base_url!r}）：{exc}")
+                live_entries = []
         else:
             live_entries = client.search_memory(self.channel_id, query, limit=max_results)
 
