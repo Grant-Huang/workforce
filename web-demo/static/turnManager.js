@@ -29,7 +29,7 @@ const TurnManager = (() => {
     }
     if (SaveIntent.detect(t)) return { kind: "save_intent", confidence: 0.95 };
     // 明显需要外部时效信息
-    if (/(天气|新闻|股价|最新|网上|搜一下)/.test(t)) {
+    if (/(天气|新闻|股价|最新|网上|联网|搜一下|搜一搜|搜索|查一下|查一查)/.test(t)) {
       return { kind: "needs_retrieval", confidence: 0.35, scene: "retrieve_search" };
     }
     // 工单/备件/交接等细节默认不在 hot，走 AgentNexus Retrieval
@@ -101,7 +101,7 @@ const TurnManager = (() => {
     return "你好。今天想先聊工作上的事，还是随便聊聊？";
   }
 
-  function formatContextBlock(results, { forWeb = false } = {}) {
+  function formatContextBlock(results, { forWeb = false, searchNotes = null } = {}) {
     const lines = [];
     for (const r of results || []) {
       if (r.provider === "websearch" || r.source === "websearch") {
@@ -111,10 +111,32 @@ const TurnManager = (() => {
         lines.push(`- [Memory/${r.source || "memory"}] ${r.text}`);
       }
     }
+    const notes = (searchNotes || []).filter(Boolean);
+    if (notes.length) {
+      lines.push(`- [系统说明] ${notes.join("；")}`);
+    }
     if (!lines.length && forWeb) {
-      return "公开检索未找到带可靠来源的结果；请明确告知用户未查到可靠来源，不要编造网页事实。";
+      return "公开检索未找到带可靠来源的结果；请明确告知用户刚查了公开网页但未查到可靠来源，不要编造网页事实，也不要说「我没法搜网络」。";
     }
     return lines.join("\n");
+  }
+
+  function buildRetrievalInstructions(baseInstructions, queryData, { voice = false } = {}) {
+    const results = (queryData && queryData.results) || [];
+    const notes = (queryData && queryData.search_notes) || [];
+    const hasWeb = results.some((r) => r && (r.source === "websearch" || r.provider === "websearch") && r.citation);
+    const ctxBlock = formatContextBlock(results, { forWeb: true, searchNotes: notes });
+    const head = voice
+      ? "检索已完成。请直接口语简短回答。"
+      : "检索已完成。请基于下列 Context 给出更准确的补充或更正（口语、短说）。";
+    return (
+      `${baseInstructions}\n\n${head}` +
+      `若有 [WebSearch] 条目，说明系统已通过公开网页检索（DuckDuckGo）拿到摘要，请据此回答并口头带上来源标题；` +
+      `若只有 [系统说明] 写明检索失败/超时，请说「刚查了公开网页，暂时没找到可靠来源」，不要说「我没法搜网络」。` +
+      `Memory/Profile 可无 citation；WebSearch 必须有来源才可当事实。\n` +
+      `${ctxBlock || "（无额外结果：如实说明刚检索未查到。）"}` +
+      (hasWeb ? "" : "")
+    );
   }
 
   /**
@@ -227,13 +249,19 @@ const TurnManager = (() => {
     const phrase = TransitionPhrases.pick(evalResult.type === "B" ? "partial_bridge" : scene);
 
     const myVersion = version;
-    const latencyBudget = 1500;
+    const wantsWeb =
+      evalResult.scene === "retrieve_search" ||
+      (evalResult.cls && evalResult.cls.scene === "retrieve_search") ||
+      /(天气|新闻|股价|最新|网上|联网|搜一下|搜一搜|搜索|查一下)/.test(text);
+    const latencyBudget = wantsWeb ? 6000 : 1500;
     const providers =
       evalResult.cls.kind === "challenge" || evalResult.forceRetrieval
         ? ["memory", "websearch"]
-        : undefined;
+        : wantsWeb
+          ? ["websearch", "memory"]
+          : undefined;
 
-    // 先发起检索（AgentNexus mock 通常 <100ms），与过渡语并行
+    // 先发起检索（AgentNexus mock 通常 <100ms；DDG 可能要数秒），与过渡语并行
     const queryPromise = ContextClient.queryContext({
       session_id: `S-${user.user_id}`,
       turn_id: turnId,
@@ -260,10 +288,11 @@ const TurnManager = (() => {
         return { turnId, type: evalResult.type, path: "discarded" };
       }
       const usable =
-        queryData && !queryData.timed_out && (queryData.results || []).some((r) => r && r.text);
+        queryData &&
+        ((queryData.results || []).some((r) => r && r.text) ||
+          ((queryData.search_notes || []).length > 0));
       if (usable) {
-        const ctxBlock = formatContextBlock(queryData.results);
-        const oneShot = `${baseInstructions}\n\n检索已完成（来自 Memory/AgentNexus）。请直接口语简短回答，依据下列 Context；不要编造。WebSearch 条目必须有来源才可当事实。\n${ctxBlock}`;
+        const oneShot = buildRetrievalInstructions(baseInstructions, queryData, { voice: true });
         await session.updater.updateInstructionsAndWait(oneShot, 2500);
         if (session === voiceSession) markTurnTiming("sessionUpdatedAckAt");
         sendEventOn(session.getWs(), { type: "response.create" });
@@ -273,7 +302,7 @@ const TurnManager = (() => {
       }
       // 超时/无结果：只说一句过渡，不再二次 cancel
       await session.updater.updateInstructionsAndWait(
-        `${baseInstructions}\n\n本轮检索未及时完成。请只说：${phrase}`,
+        `${baseInstructions}\n\n本轮公开检索未及时完成。请只说：${phrase}。不要说「我没法搜网络」。`,
         2500
       );
       if (session === voiceSession) markTurnTiming("sessionUpdatedAckAt");
@@ -284,7 +313,7 @@ const TurnManager = (() => {
     }
 
     // 快查直出：本地 Memory 很快有结果时，跳过过渡语 + 取消/再播，避免双次 session.update 卡住
-    const FAST_MS = 400;
+    const FAST_MS = wantsWeb ? 2500 : 400;
     const raced = await Promise.race([
       queryPromise.then((data) => ({ kind: "query", data })),
       new Promise((resolve) => setTimeout(() => resolve({ kind: "slow" }), FAST_MS)),
@@ -297,12 +326,11 @@ const TurnManager = (() => {
     const hasUsable =
       raced.kind === "query" &&
       raced.data &&
-      !raced.data.timed_out &&
-      (raced.data.results || []).some((r) => r && r.text);
+      (((raced.data.results || []).some((r) => r && r.text)) ||
+        ((raced.data.search_notes || []).length > 0));
 
     if (hasUsable) {
-      const ctxBlock = formatContextBlock(raced.data.results);
-      const oneShot = `${baseInstructions}\n\n检索已完成（来自 Memory/AgentNexus）。请直接口语简短回答，依据下列 Context；不要编造。WebSearch 条目必须有来源才可当事实。\n${ctxBlock}`;
+      const oneShot = buildRetrievalInstructions(baseInstructions, raced.data, { voice: false });
       await session.updater.updateInstructionsAndWait(oneShot, 2500);
       if (session === voiceSession) markTurnTiming("sessionUpdatedAckAt");
       sendEventOn(session.getWs(), { type: "response.create" });
@@ -343,8 +371,7 @@ const TurnManager = (() => {
       return { turnId, type: evalResult.type, path: "discarded_before_refined" };
     }
 
-    const ctxBlock = formatContextBlock(queryData && queryData.results);
-    const refined = `${baseInstructions}\n\n检索已完成。请基于下列 Context 给出更准确的补充或更正（口语、短说）。WebSearch 条目必须有来源才可当事实；Memory/Profile 可无 citation。\n${ctxBlock || "（无额外结果：如实说明未查到。）"}`;
+    const refined = buildRetrievalInstructions(baseInstructions, queryData, { voice: false });
 
     if (session.responsePending) {
       sendEventOn(session.getWs(), { type: "response.cancel" });

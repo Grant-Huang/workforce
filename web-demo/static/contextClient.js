@@ -41,7 +41,8 @@ const ContextClient = (() => {
 
   function queryContext(payload) {
     const budget = (payload && payload.options && payload.options.latency_budget_ms) || 1500;
-    return post("/api/context/query", payload, Math.max(budget + 1500, 4000));
+    // DDG 常需数秒；给服务端预算 + 网络余量
+    return post("/api/context/query", payload, Math.max(budget + 2500, 8000));
   }
 
   function memoryEvent(payload) {

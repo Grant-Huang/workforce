@@ -23,10 +23,10 @@ from transition_phrases import pick_phrase, phrase_count
 
 _websearch = WebSearchProvider()
 
-# 粗粒度意图：需要联网的时效/公开查询（避免「今日/今天」误触发拖慢本地记忆问）
+# 粗粒度意图：需要联网的时效/公开查询
 _WEB_HINT = re.compile(
-    r"(天气|新闻|股价|汇率|搜一下|网上搜|最新消息|wikipedia|维基|"
-    r"what is|who is|latest news|weather)",
+    r"(天气|新闻|股价|汇率|搜一下|搜一搜|搜索|查一下|查一查|网上|联网|最新消息|"
+    r"公开信息|wikipedia|维基|what is|who is|latest|news|weather|google|duckduckgo)",
     re.I,
 )
 _MEMORY_HINT = re.compile(
@@ -133,6 +133,10 @@ async def context_query(request: web.Request) -> web.Response:
     force_providers = options.get("providers")  # 质疑路径可强制
 
     providers = force_providers or _plan_providers(query)
+    # 公开网页检索常 >1.5s；若规划了 websearch 且客户端预算过紧，抬到至少 6s
+    if "websearch" in providers and latency_budget_ms < 6000:
+        latency_budget_ms = 6000
+
     memory = get_memory_service()
     mock_entries = agentnexus_mock.get_seed_memory(user["channel_id"])
     mem_provider = MemoryProvider(
@@ -160,8 +164,6 @@ async def context_query(request: web.Request) -> web.Response:
         )
     except asyncio.TimeoutError:
         timed_out = True
-        # 超时：尽量拿已完成的；Phase 1 简化为两边都空 + 标记
-        # 后续优化：部分结果早到先返回（设计 §8 注明）
         mem_res, web_res = [], []
         try:
             mem_res = await asyncio.wait_for(run_memory(), timeout=0.05)
@@ -173,13 +175,26 @@ async def context_query(request: web.Request) -> web.Response:
     # Citation 分层 C：过滤无 citation 的 WebSearch「业务断言」
     usable_web = []
     rejected_web = 0
+    web_errors = []
     for item in web_res:
         if item.get("citation"):
             usable_web.append(item)
         else:
             rejected_web += 1
+            if item.get("freshness") == "error" or item.get("meta", {}).get("error"):
+                web_errors.append(str(item.get("text") or item.get("meta", {}).get("error") or "unknown"))
 
     results = list(mem_res) + usable_web
+    search_notes: list[str] = []
+    if "websearch" in providers:
+        if timed_out and not usable_web:
+            search_notes.append("已尝试公开网页检索（DuckDuckGo），但在时限内未返回结果。")
+        elif not usable_web:
+            detail = web_errors[0] if web_errors else "无带来源的可用条目"
+            search_notes.append(f"已尝试公开网页检索（DuckDuckGo），暂无可用结果：{detail}")
+        else:
+            search_notes.append(f"公开网页检索返回 {len(usable_web)} 条带来源的结果。")
+
     data = {
         "session_id": body.get("session_id"),
         "turn_id": body.get("turn_id"),
@@ -187,6 +202,7 @@ async def context_query(request: web.Request) -> web.Response:
         "query": query,
         "providers_used": providers,
         "results": results[:max_results],
+        "search_notes": search_notes,
         "timed_out": timed_out,
         "elapsed_ms": elapsed_ms,
         "citation_policy": "layer_C",
