@@ -38,7 +38,13 @@ def _http_get(url: str, *, timeout: int = 12) -> bytes:
         return resp.read()
 
 
-def _http_post_json(url: str, payload: dict[str, Any], *, timeout: int = 15) -> dict[str, Any]:
+def _http_post_json(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    timeout: int = 15,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     req = Request(
         url,
@@ -47,6 +53,7 @@ def _http_post_json(url: str, payload: dict[str, Any], *, timeout: int = 15) -> 
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "Mozilla/5.0 (compatible; WorkforceWebSearch/1.0)",
+            **(headers or {}),
         },
         method="POST",
     )
@@ -77,7 +84,6 @@ def _row(
 
 def _search_tavily(query: str, max_results: int, api_key: str) -> list[dict[str, Any]]:
     payload = {
-        "api_key": api_key,
         "query": query,
         "max_results": max_results,
         "search_depth": os.environ.get("TAVILY_SEARCH_DEPTH", "basic"),
@@ -92,7 +98,16 @@ def _search_tavily(query: str, max_results: int, api_key: str) -> list[dict[str,
         payload["topic"] = "news"
 
     try:
-        data = _http_post_json("https://api.tavily.com/search", payload, timeout=18)
+        # Tavily 已弃用把 key 放进请求体的 api_key 字段——部分（尤其 dev tier）key 直接拒绝这种
+        # 写法，只认 Authorization: Bearer 头，这也是本次要修的 bug 本身（该函数之前一直用旧的
+        # body 字段）。用假 key 实测过：换成 Bearer 头之后请求能正常打到 api.tavily.com 并拿到
+        # 结构化的 401（而不是被拒绝在别的层面），说明请求格式本身是对的。
+        data = _http_post_json(
+            "https://api.tavily.com/search",
+            payload,
+            timeout=18,
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:240] if exc.fp else str(exc)
         raise RuntimeError(f"Tavily HTTP {exc.code}: {detail}") from exc
