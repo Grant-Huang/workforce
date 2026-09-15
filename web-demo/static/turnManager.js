@@ -147,6 +147,10 @@ const TurnManager = (() => {
     activeTurn = { turnId, version };
 
     const workingDoc = await WorkingMemory.get(user.user_id);
+    // 登录响应里的 profile 作兜底（bootstrap/IndexedDB 失败时寒暄仍能引导）
+    if (!workingDoc.user_profile || !workingDoc.user_profile.role) {
+      workingDoc.user_profile = user.profile || workingDoc.user_profile || {};
+    }
     const evalResult = answerability(text, workingDoc);
 
     // --- save-intent：走 memory/event + 短确认 ---

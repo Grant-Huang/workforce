@@ -120,8 +120,26 @@ def compatible_mode_base():
     return "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
+ASSET_VERSION = os.environ.get("ASSET_VERSION", "20260915a")
+
+
 async def index(request):
-    return web.FileResponse(BASE_DIR / "index.html")
+    html = (BASE_DIR / "index.html").read_text(encoding="utf-8")
+    # 防 Cloudflare/浏览器长缓存旧 JS，导致 TurnManager/记忆链路不生效
+    html = html.replace("/static/", f"/static/")
+    html = html.replace('.js"></script>', f'.js?v={ASSET_VERSION}"></script>')
+    html = html.replace('.css">', f'.css?v={ASSET_VERSION}">')
+    resp = web.Response(text=html, content_type="text/html", charset="utf-8")
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
+
+
+@web.middleware
+async def no_cache_static_middleware(request, handler):
+    resp = await handler(request)
+    if request.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate, max-age=0"
+    return resp
 
 
 async def config(request):
@@ -130,6 +148,7 @@ async def config(request):
         "voices": VOICE_OPTIONS,
         "hasKey": bool(QWEN_API_KEY),
         "hasWorkspaceId": bool(QWEN_WORKSPACE_ID),
+        "assetVersion": ASSET_VERSION,
     })
 
 
@@ -274,7 +293,7 @@ async def on_startup(app: web.Application):
         print(f"MemoryService startup warning: {e}")
 
 
-app = web.Application()
+app = web.Application(middlewares=[no_cache_static_middleware])
 app.on_startup.append(on_startup)
 app.router.add_get("/", index)
 app.router.add_get("/api/config", config)

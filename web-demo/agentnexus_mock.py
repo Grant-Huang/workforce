@@ -243,9 +243,32 @@ def get_seed_profile(channel_id: str = "demo-channel") -> dict:
 
 
 def _query_tokens(query: str) -> list[str]:
+    """拆查询词。纯中文连续句不能整段当一个 token，否则 live 检索会 miss。"""
     q = (query or "").strip()
-    tokens = [m.group(0) for m in re.finditer(r"[A-Za-z0-9][\w\-]*|[\u4e00-\u9fff]{2,}", q)]
-    return tokens or ([q] if q else [])
+    if not q:
+        return []
+    tokens: list[str] = []
+    for m in re.finditer(r"[A-Za-z0-9][\w\-]*", q):
+        tokens.append(m.group(0))
+    # 连续汉字：抽 2–4 字滑动片 + 常见业务关键词
+    for m in re.finditer(r"[\u4e00-\u9fff]+", q):
+        span = m.group(0)
+        if len(span) <= 4:
+            tokens.append(span)
+        else:
+            for n in (4, 3, 2):
+                for i in range(0, len(span) - n + 1):
+                    tokens.append(span[i : i + n])
+    # 去重保序
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tokens:
+        tl = t.lower()
+        if tl in seen or len(t) < 2:
+            continue
+        seen.add(tl)
+        out.append(t)
+    return out or ([q] if q else [])
 
 
 def search_memory(channel_id: str, query: str, limit: int = 8) -> list[dict]:

@@ -52,13 +52,18 @@ const WorkingMemory = (() => {
 
   async function get(userId) {
     if (!userId) return emptyDoc("");
-    const db = await openDb();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE, "readonly");
-      const req = tx.objectStore(STORE).get(userId);
-      req.onsuccess = () => resolve(req.result || emptyDoc(userId));
-      req.onerror = () => reject(req.error);
-    });
+    try {
+      const db = await openDb();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readonly");
+        const req = tx.objectStore(STORE).get(userId);
+        req.onsuccess = () => resolve(req.result || emptyDoc(userId));
+        req.onerror = () => reject(req.error);
+      });
+    } catch (e) {
+      console.warn("WorkingMemory.get failed, using empty doc:", e);
+      return emptyDoc(userId);
+    }
   }
 
   async function put(doc) {
