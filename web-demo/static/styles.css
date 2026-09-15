@@ -378,3 +378,68 @@ body {
   background: radial-gradient(circle at 35% 32%, #d6f0ff, #6ab8ff 55%, #2f7fe0 100%);
   will-change: transform, box-shadow;
 }
+
+/* Phase 1 登录门禁 */
+.loginGate {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(160deg, #eef6f2 0%, #f7f7f8 45%, #e8eef5 100%);
+  z-index: 100;
+}
+.loginGate[hidden] { display: none !important; }
+.loginCard {
+  width: min(360px, 92vw);
+  padding: 28px 24px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.06);
+}
+.loginCard h1 {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 650;
+}
+.loginCard label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.loginCard input {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 1rem;
+  color: var(--text);
+}
+.loginCard button[type=submit] {
+  margin-top: 4px;
+  padding: 10px 14px;
+  border: none;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 1rem;
+  cursor: pointer;
+}
+.loginHint { margin: 0; font-size: 0.8rem; color: var(--muted); line-height: 1.4; }
+.loginError { margin: 0; color: var(--danger); font-size: 0.85rem; }
+.topbarRight { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.userChip { font-size: 0.8rem; color: var(--muted); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.logoutBtn {
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  color: var(--muted);
+}

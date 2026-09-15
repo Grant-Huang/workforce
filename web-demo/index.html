@@ -7,11 +7,31 @@
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-  <div class="app">
+  <div id="loginGate" class="loginGate">
+    <form id="loginForm" class="loginCard" novalidate>
+      <h1>Workforce Voice</h1>
+      <p class="loginHint">Phase 1 需登录后才能开语音与读写记忆</p>
+      <label>用户名
+        <input id="loginUser" type="text" name="username" value="demo" autocomplete="username" required>
+      </label>
+      <label>密码
+        <input id="loginPass" type="password" name="password" value="demo123" autocomplete="current-password" required>
+      </label>
+      <button type="submit" id="loginSubmit">登录</button>
+      <p id="loginError" class="loginError" hidden></p>
+      <p class="loginHint">测试账号：demo / demo123（产线主管 · 兴趣含设备异常/排产）</p>
+    </form>
+  </div>
+
+  <div class="app" id="appMain" hidden>
     <header class="topbar">
       <button type="button" id="tuningToggle" class="tuningToggle" aria-label="调参" title="调参">⚙</button>
-      <select id="voiceSelect" class="voiceSelect" aria-label="选择音色" title="选择音色"></select>
-      <span class="status" id="status">未连接</span>
+      <div class="topbarRight">
+        <span class="userChip" id="userChip"></span>
+        <button type="button" id="logoutBtn" class="logoutBtn">退出</button>
+        <select id="voiceSelect" class="voiceSelect" aria-label="选择音色" title="选择音色"></select>
+        <span class="status" id="status">未连接</span>
+      </div>
     </header>
 
     <!-- 调参面板：VAD threshold / silence_duration_ms / 播放淡入淡出时长，本地留存，下次开始
@@ -105,11 +125,16 @@
     </footer>
   </div>
 
+  <script src="/static/workingMemory.js"></script>
   <script src="/static/memory.js"></script>
   <script src="/static/history.js"></script>
   <script src="/static/agentnexus.js"></script>
   <script src="/static/saveIntent.js"></script>
   <script src="/static/memoryExtraction.js"></script>
+  <script src="/static/auth.js"></script>
+  <script src="/static/contextClient.js"></script>
+  <script src="/static/phrases.js"></script>
+  <script src="/static/turnManager.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

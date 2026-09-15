@@ -26,6 +26,9 @@ from aiohttp import web, WSMsgType
 from dotenv import load_dotenv
 
 import agentnexus_mock
+import auth
+import context_gateway
+from memory_service import get_memory_service
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR.parent / ".env")
@@ -54,14 +57,10 @@ PRODUCTION = os.environ.get("PRODUCTION", "").lower() in ("1", "true", "yes")
 # default, wasn't accepted by this model ("Voice 'Chelsie' is not supported."), so don't
 # assume without testing if one of these turns out unsupported too.
 VOICE_OPTIONS = [
-    {"id": "Griet", "label": "Griet（女，荷兰语，成熟文艺）"},
-    {"id": "Jennifer", "label": "Jennifer（女，美式英语，电影质感，默认）"},
-    {"id": "Katerina", "label": "Katerina（女，俄语，御姐音色）"},
-    {"id": "Mia", "label": "Mia（女，中文，细腻慢生活）"},
-    {"id": "Alek", "label": "Alek（男，俄语，冷峻中带暖）"},
-    {"id": "Andre", "label": "Andre（男，葡萄牙语，磁性沉稳）"},
-    {"id": "Bodega", "label": "Bodega（男，西班牙语，热情大叔）"},
-    {"id": "Emilien", "label": "Emilien（男，法语，浪漫大哥哥）"},
+    {"id": "Griet", "label": "Female(G)"},
+    {"id": "Jennifer", "label": "Female(J)"},
+    {"id": "Alek", "label": "Male(A)"},
+    {"id": "Bodega", "label": "Male(B)"},
 ]
 
 
@@ -262,12 +261,28 @@ async def memory_extract(request):
         return web.json_response({"error": str(e)}, status=502)
 
 
+async def on_startup(app: web.Application):
+    # 预热 LanceDB，并把 demo 种子镜像进 semantic（不深拷业务流水）
+    try:
+        mem = get_memory_service()
+        for username, user in auth.USERS.items():
+            mem.upsert_profile(user["user_id"], user["profile"])
+            seeds = agentnexus_mock.get_seed_memory(user["channel_id"])
+            n = mem.mirror_agentnexus_entries(user["user_id"], seeds)
+            print(f"MemoryService ready; mirrored {n} seed facts for {username}")
+    except Exception as e:
+        print(f"MemoryService startup warning: {e}")
+
+
 app = web.Application()
+app.on_startup.append(on_startup)
 app.router.add_get("/", index)
 app.router.add_get("/api/config", config)
 app.router.add_post("/api/dictation-cleanup", dictation_cleanup)
 app.router.add_post("/api/memory-extract", memory_extract)
 app.router.add_get("/ws", relay)
+auth.register(app)
+context_gateway.register(app)
 if not PRODUCTION:
     agentnexus_mock.register(app)
 app.router.add_static("/static/", BASE_DIR / "static")
@@ -280,5 +295,6 @@ if __name__ == "__main__":
         print("AgentNexus mock: disabled (PRODUCTION=1)")
     else:
         print("AgentNexus mock: /agentnexus-mock/* (see agentnexus_mock.py)")
+    print("Auth: /api/auth/login|logout|me  Context: /api/session/bootstrap /api/context/query /api/memory/event")
     print(f"Listening on {HOST}:{PORT}")
     web.run_app(app, host=HOST, port=PORT)

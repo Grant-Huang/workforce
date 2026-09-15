@@ -527,17 +527,28 @@ const BASE_INSTRUCTIONS = `你是一个语音助手，正在和用户实时语�
 - 这类编号里的"-"要念成"杠"，不要念成"减"；只有在数学算式（比如"5-3=2"）里出现的"-"才是减号，念"减"。
 - 年份、金额、时间、数量这些正常的数字仍按日常习惯念（比如"2026年"念"二零二六年"或"两千零二十六年"都行，"100元"照常念"一百元"），不要套用编号的逐位读法。
 
-回答长度：先判断这条问题属于哪一类，再按对应的长度来，不要机械地都说成一两句话或者都展开成一大段：
-- **查询类**（问日期时间、单一事实、确认性问题）：1-3 句话说完，给答案不给报告，除非用户明确要求展开。
-- **列举类**（问日程安排、待办事项、多条信息）：一口气最多说 3 条左右，说完问一句"还有几条要不要都说说"，不要一次性倒完一大串，人一次性靠听记不住那么多。
-- **分析/解释类**（需要讲清楚原因、讲清楚一个技术/工程问题、帮用户理一件复杂的事）：可以说得详细，但先说一句"路线图"（比如"这个我从两方面说"），再按"第一……第二……"这样一段段说，段与段之间自然停顿，给用户留插话的空当；说了几点就是几点，中途不要冒出没预告过的第三点，语音没法让用户"往回听"，说漏了就是说漏了。
-语音是念给人听的，不是照着文字稿念——同样的内容，念出来比读一遍慢得多，能一句话说清楚的不要拖成三句。
+回答长度根据问题自适应：
+- 闲聊/确认/指令类（"好"/"再见"/"打开灯"）：1 句话内
+- 普通问询（问"几点"/问"天气"等）：1-2 句
+- 解释/分析类（"为什么"/"怎么理解"）：可以详细说，但避免无意义重复
+- 一般不要客套（如"好问题！"）；仅当问题的确深入时，可适当客套一句并简要说明原因
+- 不要列表/标题/emoji，纯口语
+语音是念给人听的，不是照着文字稿念——能一句话说清楚的不要拖成三句。
+
+寒暄开场（用户只说「你好」「在吗」等、没有具体问题）：
+- 先简短回礼，再根据当前提供的用户画像/兴趣/近期话题，用一句话自然引导到对方可能关心的事
+- 一次只提一个主话题（最多再带一个备选）；不要念清单
+- 只能使用已提供的画像与记忆，不要臆测用户兴趣；若没有画像，用一句开放式询问即可
+
+真实性：
+- 只使用当前提供的背景/Context；没有依据时不要编造
+- 需要外部事实且尚未提供 Context 时，不要猜测
+- WebSearch / 业务系统结果必须带过来源才能当事实说；Memory/Profile 可无来源但不得编造
 
 背景信息的使用：
 - 如果背景信息里有跟当前问题相关的内容，用自己的话自然带出来，不要逐字复述，也不要提"背景信息"这个说法本身。
-- 如果问题明显需要用户之前提到的具体信息（比如某个日程、决定、事实），但背景信息里完全没有相关内容，不要编造答案——诚实说明你目前没有这方面的记录，比如"这个我目前没有相关记录"或者"这个我还得再查一下"，可以顺带问用户要不要现在告诉你。
+- 如果问题明显需要用户之前提到的具体信息，但背景信息里完全没有相关内容，不要编造——诚实说明目前没有相关记录。
 - 常识性、闲聊性的问题正常回答，不用刻意强调"没有记录"。`;
-
 /**
  * Factory for "send a session.update, wait for its session.updated ack" -- one instance
  * per connection (voiceSession/textSession below), so the two connections' in-flight
@@ -614,94 +625,58 @@ const textSession = { getWs: () => textWs, updater: textUpdater, pendingUserText
  * just needs to briefly confirm rather than search-and-answer.
  */
 async function handleUserTurn(rawText, session) {
-  // Real-device report (2026-08-25): with threshold/silence_duration_ms tuned low
-  // (0.50 / 750ms), a single continuous utterance can get split into two VAD segments
-  // -- a mid-sentence pause outlasts silence_duration_ms, the server commits+transcribes
-  // a fragment, then the user keeps talking and eventually triggers a second commit for
-  // the rest. Each transcript reaches here and used to fire its own response.create
-  // regardless of whether the previous one had finished -- with create_response:false
-  // there's nothing server-side stopping two responses from streaming concurrently, and
-  // this app never tracked which response a response.audio.delta belonged to, so the two
-  // unrelated audio streams got interleaved into the same playback buffer. That's a
-  // plausible cause of the reported "answered twice" and the raspy/garbled audio quality
-  // both -- not just a buffer-underrun symptom. Treat a transcript that arrives while the
-  // previous turn's response is still in flight as a continuation, the same way a real
-  // barge-in would: cancel the stale response before starting the new one, instead of
-  // letting both run at once.
-  //
-  // Follow-up report (still reproducible at the safer 0.55/900 defaults): even with the
-  // cancel above, the assistant would sometimes ask about something the user had *just*
-  // said in the fragment right before it ("是七点还是八点呢？" right after the user said
-  // "八点钟开始") -- i.e. it wasn't just an audio-overlap problem, our own local
-  // grounding (memory search, the instructions patch below) was regrounding on only the
-  // *second* fragment's text, discarding whatever the first fragment said the instant
-  // `session.pendingUserText` got overwritten. Concatenating the stale fragment onto the
-  // new one before grounding gives both this app's local search and the save-intent
-  // check the whole utterance, not half of it.
+  // VAD 切分续说 / 并发 response 防护：见历史注释（2026-08-25）。
   const text = session.responsePending && session.pendingUserText
     ? `${session.pendingUserText} ${rawText}`
     : rawText;
 
-  // Paired with the assistant's reply once it's done (see finalizeAssistantTurn) to run
-  // memory extraction on the complete exchange -- extraction needs both halves, not
-  // just what the user said. Set unconditionally (even for a save-intent turn, which
-  // finalizeAssistantTurn skips by re-checking SaveIntent.detect itself) so there's one
-  // place deciding that, not two.
   session.pendingUserText = text;
 
   if (session.responsePending) {
     if (session === voiceSession) stopPlayback();
     sendEventOn(session.getWs(), { type: "response.cancel" });
     session.responsePending = false;
+    TurnManager.invalidate();
   }
 
-  const saveIntent = SaveIntent.detect(text);
+  if (!Auth.isLoggedIn()) {
+    statusEl.textContent = "请先登录";
+    return;
+  }
 
-  if (saveIntent) {
-    // source defaults to "local" here (not "agentnexus") -- honestly reflects "not yet
-    // confirmed synced" until createMemoryEntry below actually succeeds, per
-    // docs/roadmap-todo.md's "记忆" section item 3. "过户" to agentnexus + the real
-    // sourceId happens via markSynced once that's confirmed, not assumed up front.
-    const localEntry = LocalMemory.add(saveIntent.content, { layer: "PROGRESS" });
-    try {
-      const created = await AgentNexusBridge.createMemoryEntry("PROGRESS", saveIntent.content);
-      if (localEntry) LocalMemory.markSynced(localEntry.id, { source: "agentnexus", sourceId: created.entry_id });
-    } catch (e) {
-      console.warn("save-intent write to AgentNexus failed (stayed local only, source stays \"local\" for a retry later):", e);
+  // Progressive Response / GREETING / 质疑 — Runtime Turn Manager
+  try {
+    await TurnManager.handleTurn({
+      text,
+      session,
+      baseInstructions: BASE_INSTRUCTIONS,
+      sendEventOn,
+      markTurnTiming,
+      voiceSession,
+    });
+  } catch (e) {
+    console.warn("TurnManager failed, falling back to local search:", e);
+    const relevant = LocalMemory.search(text, 5);
+    if (relevant.length > 0) {
+      const lines = relevant.map((e) => `- ${e.text}`);
+      await session.updater.updateInstructionsAndWait(
+        `${BASE_INSTRUCTIONS}\n\n以下是用户过去说过、可能相关的内容，如果有帮助请参考：\n${lines.join("\n")}`
+      );
+    } else {
+      await session.updater.updateInstructionsAndWait(BASE_INSTRUCTIONS);
     }
-    const instructions = `${BASE_INSTRUCTIONS}\n\n用户刚才明确要求记住这件事："${saveIntent.content}"，你已经帮TA记下了。只需要简短确认一句就行，不要复述内容、不要追问。`;
-    await session.updater.updateInstructionsAndWait(instructions);
     if (session === voiceSession) markTurnTiming("sessionUpdatedAckAt");
     sendEventOn(session.getWs(), { type: "response.create" });
     if (session === voiceSession) markTurnTiming("responseCreateSentAt");
     session.responsePending = true;
-    return;
   }
-
-  // No longer stores the raw text here (used to be LocalMemory.add(text) on every
-  // turn) -- that's now finalizeAssistantTurn's job, via MemoryExtraction, once the
-  // assistant's reply is known too (docs/app-design.md 7.3). The raw transcript itself
-  // isn't lost -- ConversationHistory (history.js) already keeps a verbatim copy.
-  const relevant = LocalMemory.search(text, 5);
-
-  if (relevant.length > 0) {
-    const lines = relevant.map((e) => `- ${e.text}`);
-    const instructions = `${BASE_INSTRUCTIONS}\n\n以下是用户过去说过、可能相关的内容，如果有帮助请参考：\n${lines.join("\n")}`;
-    await session.updater.updateInstructionsAndWait(instructions);
-  } else {
-    await session.updater.updateInstructionsAndWait(BASE_INSTRUCTIONS); // clear out any previous turn's injected memory
-  }
-  if (session === voiceSession) markTurnTiming("sessionUpdatedAckAt");
-
-  sendEventOn(session.getWs(), { type: "response.create" });
-  if (session === voiceSession) markTurnTiming("responseCreateSentAt");
-  session.responsePending = true;
 }
 
 function handleBargeIn() {
   stopPlayback();
   sendEvent({ type: "response.cancel" });
   voiceSession.responsePending = false;
+  TurnManager.invalidate();
   assistantBubbleEl = null;
   assistantHasDelta = false;
   setState(STATE.LISTENING);
@@ -790,6 +765,10 @@ function handleServerEvent(json) {
 
 async function start() {
   if (state !== STATE.IDLE) return;
+  if (!Auth.isLoggedIn()) {
+    statusEl.textContent = "请先登录";
+    return;
+  }
   if (startPromise) return startPromise;
 
   startPromise = (async () => {
@@ -1186,6 +1165,10 @@ function stopTextSession(reason) {
 async function sendTextMessage(text) {
   text = text.trim();
   if (!text) return;
+  if (!Auth.isLoggedIn()) {
+    statusEl.textContent = "请先登录";
+    return;
+  }
 
   if (textState === TEXT_STATE.IDLE) await startTextSession();
   addBubble("user", text);
@@ -1721,12 +1704,90 @@ tuningPanel.addEventListener("click", (event) => {
 renderSuggestions();
 setState(STATE.IDLE);
 
+const loginGate = document.getElementById("loginGate");
+const appMain = document.getElementById("appMain");
+const loginForm = document.getElementById("loginForm");
+const loginError = document.getElementById("loginError");
+const userChip = document.getElementById("userChip");
+
+async function enterApp(user) {
+  loginGate.hidden = true;
+  appMain.hidden = false;
+  userChip.textContent = user.display_name || user.username || user.user_id;
+  // IndexedDB 失败不应挡住已成功的登录（Safari 私有模式 / 损坏库等）
+  try {
+    await LocalMemory.bindUser(user.user_id);
+    await ConversationHistory.bindUser(user.user_id);
+  } catch (e) {
+    console.warn("Working Memory bind failed:", e);
+    statusEl.textContent = "已登录（本地记忆暂不可用）";
+  }
+  // 有本地 → 立即可用；后台 bootstrap 刷新（Runtime §8）
+  try {
+    const data = await ContextClient.bootstrap();
+    try {
+      await WorkingMemory.applyBootstrap(user.user_id, data);
+      await LocalMemory.bindUser(user.user_id);
+    } catch (e) {
+      console.warn("applyBootstrap to IndexedDB failed:", e);
+    }
+    statusEl.textContent = `已登录 · 记忆 ${ (data.hot_memory || []).length } 条`;
+  } catch (e) {
+    console.warn("bootstrap failed (using local Working Memory if any):", e);
+    statusEl.textContent = "已登录（bootstrap 暂不可用，使用本地缓存）";
+  }
+  AgentNexusBridge.pullMemory();
+  ConversationHistory.retryUnsynced();
+}
+
+async function showLogin() {
+  loginGate.hidden = false;
+  appMain.hidden = true;
+  if (state !== STATE.IDLE) stop();
+  if (textState !== TEXT_STATE.IDLE) stopTextSession();
+}
+
+function formatLoginError(e) {
+  const msg = (e && e.message) || "";
+  // WebKit 把多种 SyntaxError 都显示成这句英文，转成可操作的中文提示
+  if (/did not match the expected pattern/i.test(msg)) {
+    return "登录响应解析失败（请确认已打开本机 web-demo 服务，并硬刷新后重试）";
+  }
+  return msg || "登录失败";
+}
+
+loginForm.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  loginError.hidden = true;
+  const username = document.getElementById("loginUser").value.trim();
+  const password = document.getElementById("loginPass").value;
+  try {
+    const user = await Auth.login(username, password);
+    await enterApp(user);
+  } catch (e) {
+    await showLogin();
+    loginError.textContent = formatLoginError(e);
+    loginError.hidden = false;
+  }
+});
+
+document.getElementById("logoutBtn").addEventListener("click", async () => {
+  await Auth.logout();
+  await showLogin();
+});
+
+(async () => {
+  const existing = await Auth.me();
+  if (existing) await enterApp(existing);
+  else await showLogin();
+})();
+
 // Refresh the local memory cache when the tab regains focus, on top of the existing
 // pull-on-conversation-start -- covers "memory changed on another device/tab while this
 // one sat idle in the background" without needing to poll on a timer (docs/roadmap-todo.md,
 // "拉取时机加一条 app 回到前台时也拉一次").
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") {
+  if (document.visibilityState === "visible" && Auth.isLoggedIn()) {
     AgentNexusBridge.pullMemory();
     ConversationHistory.retryUnsynced();
   }

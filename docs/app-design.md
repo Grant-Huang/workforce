@@ -1,6 +1,12 @@
 # App 功能需求设计文档
 
-这份文档是产品/功能层面的完整需求说明，覆盖三块：已经做好的东西（盘点，别重复造轮子）、正在做的这次改动（ChatGPT 风格界面 + 语音口述转文字）、以及技术方案里哪些部分是"设计好了但还没验证过"。改之前先确认这份文档跟你的预期对齐，改完之后这份文档也应该保持更新，作为以后接手的人的入口。
+这份文档是**产品/功能**层面的需求说明（交互模式、UI、口述转文字、会话状态机等）。
+
+> **记忆 / Context / Progressive Response / LanceDB / Provider 体系** 的权威设计已迁至：  
+> [`docs/realtime-voice-agent-runtime-design.md`](./realtime-voice-agent-runtime-design.md)（**V1.1-final**）。  
+> 下文第七节仅保留历史结论摘要 + 指向，避免双源漂移。
+
+改之前先确认文档跟预期对齐；改完保持更新。
 
 ## 一、整体视觉方向：参照 ChatGPT App
 
@@ -105,8 +111,9 @@ App 里实际上有三种不同的"用户怎么把话传给模型"的方式，�
 
 这些已经做好、正常工作，这次改动不用碰：
 
-- **本地记忆检索**：关键词打分 + 时间衰减，`MemoryStore`（iOS）/`memory.js`（网页），已知局限是没有语义理解
-- **AgentNexus 记忆同步**：iOS 连真实 AgentNexus（需要自己部署、按提案改过），网页 demo 连的是内存里的 mock server，不是真实系统
+- **本地记忆检索（历史实现）**：曾用 `memory.js` 关键词检索 + `localStorage`；**V1.1-final 起废弃不迁移**，改 IndexedDB Working Memory + Server LanceDB。见 Runtime 设计 §7–§8。
+- **AgentNexus**：Phase 1 用**本地 Mock + 种子事实**；登录用户必填。长期业务真相源策略见 Runtime 设计 §7。
+- **Progressive Response / Context API / WebSearch(DDG)**：见 Runtime 设计全文。
 - **"记住…"意图检测**：`SaveIntent`，识别到明确的记住指令时走结构化写入，不是简单的消息记录
 - **连接生命周期三条规则**：建立失败要提示、不主动断开、5 分钟无操作自动挂断——网页和 iOS 现在都有了（上一个 PR 刚补齐 iOS 这边）
 - **建议按钮**：早上问日程、下午问工作总结，两边都有
@@ -159,40 +166,38 @@ App 里实际上有三种不同的"用户怎么把话传给模型"的方式，�
   - 起草文案库（几个类别 × 3-5 句），人工审校定稿
   - 验证 Realtime 协议在"工具调用进行中"这个阶段，能不能先说一句预设文本、再等结果、再继续——这是路线 A 能不能落地的前提，目前完全没测过
 
-## 七、黑话词典与记忆提炼（2026-08-23 讨论收敛）
+## 七、黑话词典与记忆提炼（历史结论 + 迁移说明）
 
-### 7.1 热词/词汇表：实测结论
+> **现行权威规范**：[`realtime-voice-agent-runtime-design.md`](./realtime-voice-agent-runtime-design.md)  
+> 下列内容保留为 2026-08 实测与产品结论，实现以 Runtime 设计为准。
 
-直接连了真实的 `wss://{workspace}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime?model=qwen3.5-omni-flash-realtime`，在 `session.update` 里试了六种可能的字段形状：顶层 `vocabulary_id`、顶层 `hotwords` 数组、`input_audio_transcription.vocabulary_id`（同时试了 `input_audio_transcription.model` 换成 `paraformer-realtime-v2`/`fun-asr-realtime`/`gummy-realtime-v1` 这几个百炼文档里出现过的、支持热词的 ASR 系列型号）。
+### 7.1 热词/词汇表：实测结论（仍有效）
 
-**结果**：所有尝试都被静默丢弃——`session.updated` 从不报错，但回显的 `session` 对象里也从来没出现过这些字段。唯一确认有效的是 `input_audio_transcription.model` 本身（默认 `qwen3-asr-flash-realtime`，可以换成别的模型名并被接受回显），但换任何模型名，旁边带的 `vocabulary_id` 都不会被保留。
+`qwen3.5-omni-flash-realtime` 的 `session.update` **不支持**热词/词汇表偏置（多种字段形状均被静默丢弃）。ASR 层纠偏走不通；黑话依赖记忆提炼 / Semantic Memory。
 
-**结论（带一个诚实的保留）**：没有证据显示 `qwen3.5-omni-flash-realtime` 的 `session.update` 支持热词/词汇表。保留意见是：测试用的是编造的假 `vocabulary_id`，没有先通过百炼独立的 `VocabularyService` REST 接口注册一个真实词表再测——但该接口文档明确写着是绑定 `fun-asr` 模型系列的，跟这个 App 用的对话模型不是一回事，即使去注册真实词表，大概率也用不到这个端点上。**结论：ASR 层面的热词偏置目前走不通，按 7.3 的方案在"事后"这层做纠偏。**
+### 7.2 词典权威源（仍有效，映射到 V1.1）
 
-### 7.2 词典该放在哪：单一权威源 + 各端同步副本，不是"客户端 vs 服务端"二选一
+单一可写权威源 + 各端只读副本：
 
-讨论中提出的顾虑：以后客户端可能同时接多个后端服务获取记忆/信息，如果每个后端服务各自维护一份词典，会有多副本冲突的风险。这个顾虑是对的，但如果直接把词典放客户端，会遇到对称的问题——这个 App 本身就有 iOS/web 两端（以后还有 Android 计划），每个客户端平台各自独立维护一份词典，一样会撞上"多副本各自漂移"的问题，只是从"N 个后端"变成"M 个客户端"。
+- **个人/团队黑话** → 会话蒸馏进 Semantic Memory，并可同步 AgentNexus（Mock→真）  
+- **通用行业术语** → 静态资源分发（Phase 后续）
 
-真正的原则是：**只能有一个权威版本，所有其他地方（不管是客户端还是后端服务）拿到的都是同步过来的只读副本，不能各自独立维护、各自能改**——这跟"记忆"那次讨论里"AgentNexus 是真相源、本地是同步缓存"是同一条纪律，只是这次的资源从"记忆"换成了"词典"。具体分两种词典处理：
+### 7.3 记忆提炼（演进）
 
-- **个人/团队黑话**（这个人管什么叫什么，随时间增长、因人而异）：由用户在客户端使用时自然产生，**客户端是权威来源**——按第 7.3 节，这类黑话直接当成记忆的一种类型存储（打 `source: "local"`，通过第六节`记忆`讨论里设计的来源同步机制"过户"进 AgentNexus），以后不管接几个后端服务，都从 AgentNexus 读同一份，不是各自收集。
-- **通用行业术语**（跟具体用户无关、不常变）：这类不是被动态编辑出来的，是一次性人工审校后当静态资源分发的，天然没有"多主体运行时修改导致冲突"这个风险，适合集中维护、分发到各端只读使用（分发机制见 `docs/roadmap-todo.md` 的"周边补全"一节）。
+历史实现：客户端 `/api/memory-extract` 异步提炼 user+assistant。  
 
-两条路径都遵守同一个纪律（只有一处能写，其他都是只读同步副本），跟"客户端还是服务端"这个位置选择无关。
+**V1.1-final 演进**：
 
-### 7.3 记忆提炼：复用口述整理的机制，异步执行
+- Browser 上报 `POST /api/memory/event`  
+- Server Distiller → LanceDB（profile / semantic / episodic / source_index）  
+- **不深拷贝** MES/ERP 流水；业务事实回源查询（Runtime §7）  
+- 旧 `localStorage`（`memory.js` / `history.js`）**丢弃不迁移**
 
-现状确认：`handleUserTurn`/`groundAndRespond` 里，每轮**只把用户说的话原封不动存进去**（`LocalMemory.add(text)`/`memoryStore.add(userText)`，`text` 是 ASR 原始转写，未经任何整理），**助手的回复完全没有被存进记忆**。
+### 7.4 Progressive 与质疑（新增，见 Runtime）
 
-方案：不新建一套基础设施，复用口述转文字已有的"一次性 HTTP 请求到 `qwen-turbo`"这套机制，只是换一个 prompt（从"整理成待发文字"换成"提炼这轮对话里值得记住的事实"）。跟口述整理的关键区别是**这一步完全不在关键延迟路径上**——口述整理必须让用户等着，这一步在这轮对话已经正常回复完之后**异步做**，哪怕 `qwen-turbo` 偶尔要几秒，用户也感觉不到。
-
-具体设计：
-- **user + assistant 一起喂给它**，不是只处理用户那半句——把"用户问了什么 + 助手给出的信息/结论"一起提炼成一条自洽的记忆，顺带补上"助手回复完全没被记住"这个缺口，也缓解"代词回指丢失"的问题。
-- **"值不值得记"在同一次调用里判断**，不单独分类——prompt 里允许"如果这轮没有值得记的内容，返回空"，不做成"先判断要不要存、再决定存什么"的两次调用（跟第六节回复长度分类的思路一致）。
-- **黑话词典作为这次调用的背景信息一起传入**——把 7.1/7.2 的纠偏需求和这一步的提炼需求合成同一次调用，不是两个独立机制。
-- **原始转写仍然要保留一份可追溯的底稿**（跟"记忆"讨论里"本机暂存区"的滚动窗口是同一份数据，不是额外新增的存储）——提炼是加工，不是替换，万一发现提炼版本有问题，能回去对照原文核实。
-
-**实现 + 实测结果（2026-08-24，web + iOS 均已完成，web 端 Playwright 端到端验证过，iOS 未编译验证）**：结构化输出这块先做了实测，不是照抄假设——直接连真实 `qwen-turbo` 的 `compatible-mode/v1/chat/completions` 端点，带上 `response_format: {"type": "json_object"}`，测了四种场景：黑话解释（正确识别、`isJargon: true`）、普通偏好类事实（正确提炼、`isJargon: false`）、纯打招呼（正确返回空列表）、已知黑话重复出现（正确不再重复提炼）。四种场景全部符合预期，确认这个模型在这个端点上的 JSON 模式是可靠的，不需要额外做 markdown 代码块剥离之类的兜底解析。落地时，"原始转写的底稿"具体就是会话状态机拆分那次新增的 `ConversationHistory`/`ConversationHistoryStore`（见第八节），提炼是在它之上做的加工，不是重新造一份存储。黑话解释类事实会额外过一次 `createMemoryEntry`（`layer: "PROGRESS"`）"过户"进 AgentNexus，普通事实只留在本地当搜索片段。save-intent 命令（"帮我记住…"）不会额外触发一次提炼，避免同一件事被存两遍。
+- 类型 A：本地可答则跳过 Retrieval/Refined  
+- 用户质疑：强制 Retrieval/Refined，并回写长期记忆 + Working Memory  
+- 过渡语 30–50 组分场景，Phase 1 经 Realtime 出声  
 
 ## 八、会话状态机拆分：文本会话 vs 语音会话（2026-08-23 讨论收敛，并入阶段 2）
 
@@ -234,7 +239,8 @@ App 里实际上有三种不同的"用户怎么把话传给模型"的方式，�
 
 ## 参考
 
+- **记忆 / Context / Progressive Response 权威设计**：[`docs/realtime-voice-agent-runtime-design.md`](./realtime-voice-agent-runtime-design.md)
 - 用户提供的参考截图：ChatGPT / Grok iOS App 界面（本次对话内）
 - Typeless（口述转整理文字类产品，作为效果参照，不是要接它的 API）
 - 现有实时语音协议细节见 `docs/qwen-realtime-voice-setup.md`
-- 待做事项清单、实施顺序、周边补全事项见 `docs/roadmap-todo.md`
+- 待做事项清单见 `docs/roadmap-todo.md`（部分条目将被 Runtime Phase 1 TodoList 取代）

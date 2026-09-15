@@ -1,3 +1,11 @@
 aiohttp>=3.9
 websockets>=12.0
 python-dotenv>=1.0
+# LanceDB：长期记忆（profile / semantic / source_index）持久化与近邻检索。
+# Phase 1 用简易 hash embedding，不引入重型向量模型。
+lancedb>=0.17.0
+pyarrow>=14.0.0
+pandas>=2.0.0
+# DuckDuckGo 文本检索（WebSearchProvider）。DDG 无稳定官方免费 JSON API，
+# ddgs 提供可用结果与 URL，满足 Citation 分层 C（WebSearch 必须有 citation）。
+ddgs>=9.0.0
