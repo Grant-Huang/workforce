@@ -524,6 +524,7 @@ const BASE_INSTRUCTIONS = `你是一个语音助手，正在和用户实时语�
 
 数字/编号的念法：
 - 电话号码、产品编码、型号、订单号、验证码这类"编号"性质的数字，每一位数字要一个一个单独念出来（比如"138-1234-5678"念成"一三八杠一二三四杠五六七八"，不要读成"一百三十八万一千二百三十四..."这种整数读法）。
+- 字母和数字连在一起、中间没有分隔符的产品代码/型号（比如"M102"、"A380"），同样要把数字部分逐位念出来，字母照常念字母，不要把数字部分当整数读（"M102"要念成"M一零二"，不能念成"M一百零二"）。
 - 这类编号里的"-"要念成"杠"，不要念成"减"；只有在数学算式（比如"5-3=2"）里出现的"-"才是减号，念"减"。
 - 年份、金额、时间、数量这些正常的数字仍按日常习惯念（比如"2026年"念"二零二六年"或"两千零二十六年"都行，"100元"照常念"一百元"），不要套用编号的逐位读法。
 
@@ -537,6 +538,35 @@ const BASE_INSTRUCTIONS = `你是一个语音助手，正在和用户实时语�
 - 如果背景信息里有跟当前问题相关的内容，用自己的话自然带出来，不要逐字复述，也不要提"背景信息"这个说法本身。
 - 如果问题明显需要用户之前提到的具体信息（比如某个日程、决定、事实），但背景信息里完全没有相关内容，不要编造答案——诚实说明你目前没有这方面的记录，比如"这个我目前没有相关记录"或者"这个我还得再查一下"，可以顺带问用户要不要现在告诉你。
 - 常识性、闲聊性的问题正常回答，不用刻意强调"没有记录"。`;
+
+/**
+ * Filler-phrase text library for masking external tool-call latency (docs/app-design.md
+ * 6.3). Tiered by how long the wait has run: tier1 fires immediately when a tool call
+ * starts (pure acknowledgment, no real content), tier2 only if the call still hasn't
+ * returned after a wait threshold (restates the user's own question -- pull the lead-in
+ * from `tier2Leads` and append that turn's ASR transcript verbatim, no model call), and
+ * tier3 only if it's *still* not back after that (another content-free reassurance,
+ * expected to be rare).
+ *
+ * NOT WIRED UP YET: there is no external tool-calling capability in this codebase to
+ * trigger off of (voiceSession's only "lookup" today is LocalMemory.search, which is
+ * synchronous local computation with nothing to mask). This is dead code until that
+ * capability exists -- see the roadmap-todo.md filler-phrase entry for what's still
+ * unverified before it can be wired in (multi-shot injection during one tool call,
+ * threshold timer/dedup logic).
+ */
+const FILLER_PHRASES = {
+  tier1: [
+    "嗯～这个让我看看哈…",
+    "呃…我来查一下…",
+    "那个…稍等我看看哈…",
+    "嗯…这个我查查…",
+    "好嘞…我看一下…",
+    "呃…等我一下哈…",
+  ],
+  tier2Leads: ["你是想问", "我看看你说的这个", "你问的是"],
+  tier3: ["我来看看…", "马上就好…", "快了快了…"],
+};
 
 /**
  * Factory for "send a session.update, wait for its session.updated ack" -- one instance
