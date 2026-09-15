@@ -85,7 +85,7 @@ Phase 2+（记忆编辑 UI、Episodic 完善、Audio Cache、超时策略优化�
 - [x] 4.1 `POST /api/session/bootstrap`
 - [x] 4.2 `POST /api/context/query` + Planner
 - [x] 4.3 MemoryProvider
-- [x] 4.4 WebSearchProvider（ddgs）
+- [x] 4.4 WebSearchProvider（Tavily；RSS 兜底）
 - [x] 4.5 统一 Result 字段
 - [x] 4.6 Citation 分层 C
 - [x] 4.7 `POST /api/memory/event`

@@ -1,18 +1,28 @@
 """WebSearchProvider：公开网页检索。
 
-主路径：`ddgs`（DuckDuckGo 等多后端）。
-兜底：Google News RSS（服务器上比 DDG HTML 抓取更稳，适合「最新新闻」类问题）。
+主路径：Tavily Search API（需 `TAVILY_API_KEY`）。
+兜底：Google News RSS（无 Key 时的新闻时效兜底）。
 Citation 分层 C：可用结果必须带 url。
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import xml.etree.ElementTree as ET
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
+
+
+def _http_open(req: Request, *, timeout: int = 15):
+    try:
+        opener = build_opener(ProxyHandler({}))
+        return opener.open(req, timeout=timeout)
+    except Exception:
+        return urlopen(req, timeout=timeout)
 
 
 def _http_get(url: str, *, timeout: int = 12) -> bytes:
@@ -24,14 +34,25 @@ def _http_get(url: str, *, timeout: int = 12) -> bytes:
         },
         method="GET",
     )
-    # 优先直连：部分部署/沙箱代理会拦搜索站；失败再走系统代理
-    try:
-        opener = build_opener(ProxyHandler({}))
-        with opener.open(req, timeout=timeout) as resp:
-            return resp.read()
-    except Exception:
-        with urlopen(req, timeout=timeout) as resp:
-            return resp.read()
+    with _http_open(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _http_post_json(url: str, payload: dict[str, Any], *, timeout: int = 15) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    req = Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; WorkforceWebSearch/1.0)",
+        },
+        method="POST",
+    )
+    with _http_open(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+    return json.loads(raw) if raw else {}
 
 
 def _row(
@@ -54,50 +75,62 @@ def _row(
     }
 
 
-def _search_ddgs(query: str, max_results: int) -> list[dict[str, Any]]:
+def _search_tavily(query: str, max_results: int, api_key: str) -> list[dict[str, Any]]:
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": max_results,
+        "search_depth": os.environ.get("TAVILY_SEARCH_DEPTH", "basic"),
+        "include_answer": False,
+        "include_images": False,
+        "include_raw_content": False,
+    }
+    # 新闻/时效问用 advanced 更稳（可被环境变量覆盖）
+    if re.search(r"(新闻|最新|消息|报道|news|latest)", query, re.I):
+        if not os.environ.get("TAVILY_SEARCH_DEPTH"):
+            payload["search_depth"] = "advanced"
+        payload["topic"] = "news"
+
     try:
-        from ddgs import DDGS
-    except ImportError:
-        from duckduckgo_search import DDGS  # type: ignore
-
-    preferred = (os.environ.get("WEBSEARCH_BACKEND") or "duckduckgo,auto").split(",")
-    backends = [b.strip() for b in preferred if b.strip()]
-    last_err: Exception | None = None
-    raw_items: list[dict[str, Any]] = []
-
-    with DDGS(timeout=20) as ddgs:
-        for backend in backends:
-            try:
-                raw_items = list(ddgs.text(query, max_results=max_results, backend=backend))
-                if raw_items:
-                    break
-            except Exception as exc:  # noqa: BLE001
-                last_err = exc
-                continue
-
-    if not raw_items and last_err is not None:
-        raise last_err
+        data = _http_post_json("https://api.tavily.com/search", payload, timeout=18)
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:240] if exc.fp else str(exc)
+        raise RuntimeError(f"Tavily HTTP {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Tavily network error: {exc}") from exc
 
     out: list[dict[str, Any]] = []
-    for item in raw_items:
-        title = item.get("title") or ""
-        body = item.get("body") or item.get("snippet") or ""
-        href = item.get("href") or item.get("link") or ""
-        if not href:
+    for item in data.get("results") or []:
+        title = (item.get("title") or "").strip()
+        url = (item.get("url") or "").strip()
+        content = (item.get("content") or item.get("snippet") or "").strip()
+        if not url:
             continue
+        text = f"{title}。{content}".strip("。") if title else content
+        if not text:
+            text = title or url
+        score = item.get("score")
+        conf = 0.72
+        try:
+            if score is not None:
+                conf = max(0.55, min(0.92, float(score)))
+        except (TypeError, ValueError):
+            pass
         out.append(
             _row(
-                text=f"{title}。{body}".strip("。"),
-                title=title,
-                url=href,
-                meta={"backend": "ddgs"},
+                text=text,
+                title=title or url,
+                url=url,
+                confidence=conf,
+                meta={"backend": "tavily", "score": score},
             )
         )
+        if len(out) >= max_results:
+            break
     return out
 
 
 def _search_google_news_rss(query: str, max_results: int) -> list[dict[str, Any]]:
-    """Google News RSS：无 API Key，对新闻时效问更稳。"""
     params = urlencode(
         {
             "q": query,
@@ -108,7 +141,6 @@ def _search_google_news_rss(query: str, max_results: int) -> list[dict[str, Any]
     )
     url = f"https://news.google.com/rss/search?{params}"
     raw = _http_get(url, timeout=12)
-
     root = ET.fromstring(raw)
     out: list[dict[str, Any]] = []
     for item in root.findall("./channel/item"):
@@ -118,7 +150,7 @@ def _search_google_news_rss(query: str, max_results: int) -> list[dict[str, Any]
         pub = (item.findtext("pubDate") or "").strip()
         if not title or not link:
             continue
-        snippet = f"{title}"
+        snippet = title
         if source:
             snippet += f"（{source}）"
         if pub:
@@ -146,21 +178,26 @@ class WebSearchProvider:
     async def query(self, query: str, *, max_results: int = 5) -> list[dict[str, Any]]:
         def _search() -> list[dict[str, Any]]:
             errors: list[str] = []
-            # 1) ddgs（含 DDG）
-            try:
-                hits = _search_ddgs(query, max_results)
-                if hits:
-                    return hits
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"ddgs: {exc}")
+            api_key = (os.environ.get("TAVILY_API_KEY") or "").strip()
 
-            # 2) Google News RSS 兜底（尤其新闻类；浏览器能搜到、服务器 ddgs 常被拦）
+            # 1) Tavily（主路径）
+            if api_key:
+                try:
+                    hits = _search_tavily(query, max_results, api_key)
+                    if hits:
+                        return hits
+                    errors.append("tavily: empty results")
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"tavily: {exc}")
+            else:
+                errors.append("tavily: TAVILY_API_KEY not set")
+
+            # 2) Google News RSS 兜底
             try:
                 hits = _search_google_news_rss(query, max_results)
                 if hits:
                     return hits
                 if _NEWSISH.search(query):
-                    # 再试一次更短的关键词（去掉口语词）
                     compact = re.sub(
                         r"(那你|帮我|搜一下|搜一搜|搜索|查一下|查一查|最近有没有|有没有)",
                         " ",

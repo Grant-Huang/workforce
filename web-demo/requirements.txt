@@ -6,6 +6,7 @@ python-dotenv>=1.0
 lancedb>=0.17.0
 pyarrow>=14.0.0
 pandas>=2.0.0
-# DuckDuckGo 文本检索（WebSearchProvider）。DDG 无稳定官方免费 JSON API，
-# ddgs 提供可用结果与 URL，满足 Citation 分层 C（WebSearch 必须有 citation）。
-ddgs>=9.0.0
+# Tavily Search API：WebSearchProvider 主路径（需 TAVILY_API_KEY）。
+# 未配置或失败时回退 Google News RSS。不再依赖 ddgs/DuckDuckGo HTML 抓取。
+# tavily-python 可选；当前用标准库 HTTPS 调用官方 REST，零额外依赖。
+# （保留说明：若改用官方 SDK，可 pip install tavily-python）

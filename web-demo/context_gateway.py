@@ -188,10 +188,10 @@ async def context_query(request: web.Request) -> web.Response:
     search_notes: list[str] = []
     if "websearch" in providers:
         if timed_out and not usable_web:
-            search_notes.append("已尝试公开网页检索（DuckDuckGo），但在时限内未返回结果。")
+            search_notes.append("已尝试公开网页检索（Tavily），但在时限内未返回结果。")
         elif not usable_web:
             detail = web_errors[0] if web_errors else "无带来源的可用条目"
-            search_notes.append(f"已尝试公开网页检索（DuckDuckGo），暂无可用结果：{detail}")
+            search_notes.append(f"已尝试公开网页检索（Tavily），暂无可用结果：{detail}")
         else:
             search_notes.append(f"公开网页检索返回 {len(usable_web)} 条带来源的结果。")
 

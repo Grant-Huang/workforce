@@ -131,7 +131,7 @@ const TurnManager = (() => {
       : "检索已完成。请基于下列 Context 给出更准确的补充或更正（口语、短说）。";
     return (
       `${baseInstructions}\n\n${head}` +
-      `若有 [WebSearch] 条目，说明系统已通过公开网页检索（DuckDuckGo）拿到摘要，请据此回答并口头带上来源标题；` +
+      `若有 [WebSearch] 条目，说明系统已通过公开网页检索（Tavily）拿到摘要，请据此回答并口头带上来源标题；` +
       `若只有 [系统说明] 写明检索失败/超时，请说「刚查了公开网页，暂时没找到可靠来源」，不要说「我没法搜网络」。` +
       `Memory/Profile 可无 citation；WebSearch 必须有来源才可当事实。\n` +
       `${ctxBlock || "（无额外结果：如实说明刚检索未查到。）"}` +

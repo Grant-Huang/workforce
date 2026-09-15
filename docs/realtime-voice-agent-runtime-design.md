@@ -25,7 +25,7 @@
 | 4 | **丢弃**现有 `localStorage` 记忆/历史，**不做迁移**；改 IndexedDB / Server |
 | 5 | 过渡语暂时走 **Qwen Realtime 出声**；Phrase Library **30–50 组**，**分场景** |
 | 6 | 类型 A（本地可完整答）→ **跳过** Retrieval/Refined；**用户质疑**时再 Retrieval/Refined，并回写长期记忆 + 本地 Working Memory |
-| 7 | Phase 1 Provider：`MemoryProvider` + **`WebSearchProvider`（DuckDuckGo）** |
+| 7 | Phase 1 Provider：`MemoryProvider` + **`WebSearchProvider`（Tavily；RSS 兜底）** |
 | 8 | 检索超时：**只播 Immediate、取消 Refined**（注明后续优化） |
 | 9 | 记忆列表/编辑/删除 UI → **Phase 2**（已记） |
 | 10 | 业务事实 citation：**分层 C** — Memory/Profile 可无 citation；WebSearch / MES（及同类业务 Provider）**必须**有 citation，否则只说未查到可靠来源 |
@@ -313,7 +313,7 @@ POST /api/session/end
 Phase 1 Planner：
 
 - 个人/偏好/「我之前说…」→ `MemoryProvider`（LanceDB + AgentNexus Mock）  
-- 时效性外部事实（天气/新闻/公开网页）→ `WebSearchProvider`（DuckDuckGo）  
+- 时效性外部事实（天气/新闻/公开网页）→ `WebSearchProvider`（Tavily；失败时 Google News RSS 兜底）  
 - 两者可并行  
 
 统一 Result 含 `citation` / `confidence` / `freshness` / `source`。
@@ -407,7 +407,7 @@ Phase 1 Planner：
 | Context 来源 | 播报业务断言 | 无 citation 时 |
 |---|---|---|
 | Memory / Profile / 会话 Working Memory | 允许 | 可播（仍禁止编造；仅限已提供内容） |
-| WebSearch（DuckDuckGo） | **必须**有 citation | 只说未查到可靠来源 / 不编造网页事实 |
+| WebSearch（Tavily） | **必须**有 citation | 只说未查到可靠来源 / 不编造网页事实 |
 | MES / ERP / 文档库等业务 Provider | **必须**有 citation | 同上 |
 
 Refined Response 的 `instructions` 中应标明每条 Context 的 `source` + `citation`；模型不得把无 citation 的 WebSearch/MES 片段当作已证实事实说出。
