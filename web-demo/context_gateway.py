@@ -76,7 +76,17 @@ async def _load_agentnexus_memory(channel_id: str) -> list[dict[str, Any]]:
     from agentnexus.client import HttpClient
 
     if isinstance(client, HttpClient):
-        return await client.list_memory_remote(channel_id)
+        # real 模式但没配 AGENTNEXUS_BASE_URL（比如只设了 PRODUCTION=1 忘了配 base_url）时，
+        # client.config.base_url 是空字符串，aiohttp 对空 host 的 URL 直接抛
+        # InvalidUrlClientError——之前这里没兜底，会把 session_bootstrap 和
+        # context_query 一起打挂成 500，包括跟 AgentNexus 完全无关的纯 WebSearch 查询
+        # （bootstrap/context_query 都无条件调用本函数，不看 providers 里有没有 "memory"）。
+        # 降级成"这轮没有 AgentNexus 记忆"，让 NexusOps/WebSearch 结果照常返回。
+        try:
+            return await client.list_memory_remote(channel_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[agentnexus] list_memory_remote 失败（base_url={client.config.base_url!r}）：{exc}")
+            return []
     return client.get_seed_memory(channel_id)
 
 
