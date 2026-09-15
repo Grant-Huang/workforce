@@ -176,6 +176,14 @@ function addBubble(role, text) {
 // entry paraphrasing the same content a second way.
 function finalizeAssistantTurn(session) {
   if (session) session.responsePending = false;
+  // 串场词 / bridge：只清 responsePending，不写入历史、不抽取、保留 pendingUserText
+  // 供后续正式回答配对（见 TurnManager 语音 path）。
+  if (session && session.skipFinalizePersist) {
+    session.skipFinalizePersist = false;
+    assistantBubbleEl = null;
+    assistantHasDelta = false;
+    return;
+  }
   const text = assistantBubbleEl ? assistantBubbleEl.textContent : "";
   // ConversationHistory.add() also pushes to AgentNexus (with sync-status tracking +
   // retry) -- see history.js.
@@ -784,6 +792,7 @@ async function handleUserTurn(rawText, session) {
     if (session === voiceSession) stopPlayback();
     sendEventOn(session.getWs(), { type: "response.cancel" });
     session.responsePending = false;
+    session.skipFinalizePersist = false;
     TurnManager.invalidate();
   }
 
@@ -830,6 +839,7 @@ function handleBargeIn() {
   micSendEnabled = true;
   sendEvent({ type: "input_audio_buffer.clear" });
   voiceSession.responsePending = false;
+  voiceSession.skipFinalizePersist = false;
   TurnManager.invalidate();
   assistantBubbleEl = null;
   assistantHasDelta = false;

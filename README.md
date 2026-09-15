@@ -11,6 +11,9 @@
 - [`docs/realtime-voice-agent-runtime-design.md`](docs/realtime-voice-agent-runtime-design.md) — 记忆 / Context / Progressive Response 设计（V1.1）
 - [`docs/app-design.md`](docs/app-design.md) — 完整功能设计（三种交互模式、口述转文字、回复长度策略等）
 - [`docs/qwen-realtime-voice-setup.md`](docs/qwen-realtime-voice-setup.md) — Qwen Realtime API 踩过的坑（域名选择、模型/音色选型）
+- [`docs/capability-map.md`](docs/capability-map.md) — AgentNexus / NexusOps / CRM 等能力地图
+- [`docs/agentnexus-external-api.md`](docs/agentnexus-external-api.md) — 智枢对接（Bearer Token、日程/待办）
+- [`docs/nexusops-external-api.md`](docs/nexusops-external-api.md) — NexusOps 对接（产线/订单/设备）
 - [`docs/agentnexus-memory-integration-proposal.md`](docs/agentnexus-memory-integration-proposal.md) — 给智枢（AgentNexus）团队的记忆体系集成建议
 - [`docs/roadmap-todo.md`](docs/roadmap-todo.md) — 开发讨论纪要/已完成事项记录（其中部分历史条目涉及已移除的 iOS 端，作为决策背景保留，不代表当前代码状态）
 - [`docs/testing-deployment.md`](docs/testing-deployment.md) — 部署/测试相关笔记（同样有历史 iOS 内容）

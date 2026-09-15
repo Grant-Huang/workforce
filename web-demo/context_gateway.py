@@ -1,9 +1,10 @@
 """Context Gateway：bootstrap / context.query / memory.event。
 
-Phase 1 Planner：
-- 个人/偏好/「我之前说…」→ MemoryProvider
+Planner（见 docs/capability-map.md）：
+- 日程/待办/偏好/个人记忆 → MemoryProvider（AgentNexus）
+- 产线/设备/订单/物料/质量/维修 → NexusOpsProvider
 - 时效外部事实 → WebSearchProvider
-- 可并行；超时标记 timed_out（客户端只播 Immediate、取消 Refined）
+- 可并行；超时标记 timed_out
 """
 from __future__ import annotations
 
@@ -14,24 +15,33 @@ from typing import Any
 
 from aiohttp import web
 
-import agentnexus_mock
+import agentnexus
 import auth
+import nexusops
 from memory_service import get_memory_service
 from providers.memory_provider import MemoryProvider
+from providers.nexusops_provider import NexusOpsProvider
 from providers.websearch_provider import WebSearchProvider
 from transition_phrases import pick_phrase, phrase_count
 
 _websearch = WebSearchProvider()
+_nexusops = NexusOpsProvider()
 
-# 粗粒度意图：需要联网的时效/公开查询
 _WEB_HINT = re.compile(
-    r"(天气|新闻|股价|汇率|搜一下|搜一搜|搜索|查一下|查一查|网上|联网|最新消息|"
+    r"(天气|新闻|股价|汇率|搜一下|搜一搜|搜索|网上|联网|最新消息|"
     r"公开信息|wikipedia|维基|what is|who is|latest|news|weather|google|duckduckgo)",
     re.I,
 )
+# AgentNexus：个人记忆 / 日程 / 待办
 _MEMORY_HINT = re.compile(
-    r"(我|记得|之前|偏好|兴趣|安排|日程|负责|产线|设备|M\d+|OEE|排产|角色|记住|"
-    r"工单|WO-?\d+|交接|备件|FAN-|SKU-|备注)",
+    r"(我|记得|之前|偏好|兴趣|安排|日程|待办|会议|预约|负责|角色|记住|"
+    r"笔记|提醒|今天有什么|有什么安排)",
+    re.I,
+)
+# NexusOps：运营事实
+_NEXUSOPS_HINT = re.compile(
+    r"(产线|设备|订单|交期|延误|延期|进度|故障|停机|维修|工单|物料|质量|抽检|"
+    r"OEE|排产|换型|备件|FAN-|SKU-|ORD-|WO-?\d+|M\d+|壳盖|托盘|支架)",
     re.I,
 )
 
@@ -49,13 +59,25 @@ def _api_err(message: str, status: int = 400) -> web.Response:
 
 def _plan_providers(query: str) -> list[str]:
     providers: list[str] = []
-    if _MEMORY_HINT.search(query) or not _WEB_HINT.search(query):
+    if _MEMORY_HINT.search(query):
         providers.append("memory")
+    if _NEXUSOPS_HINT.search(query):
+        providers.append("nexusops")
     if _WEB_HINT.search(query):
         providers.append("websearch")
+    # 默认：无明确运营词时走 memory；纯运营词已进 nexusops
     if not providers:
         providers.append("memory")
     return providers
+
+
+async def _load_agentnexus_memory(channel_id: str) -> list[dict[str, Any]]:
+    client = agentnexus.get_client()
+    from agentnexus.client import HttpClient
+
+    if isinstance(client, HttpClient):
+        return await client.list_memory_remote(channel_id)
+    return client.get_seed_memory(channel_id)
 
 
 async def session_bootstrap(request: web.Request) -> web.Response:
@@ -68,25 +90,41 @@ async def session_bootstrap(request: web.Request) -> web.Response:
     profile = user["profile"]
     memory.upsert_profile(user["user_id"], profile)
 
-    # 从 Mock 拉种子事实并镜像（真相源仍是 Mock）
-    mock_entries = agentnexus_mock.get_seed_memory(user["channel_id"])
-    memory.mirror_agentnexus_entries(user["user_id"], mock_entries)
+    an_entries = await _load_agentnexus_memory(user["channel_id"])
+    memory.mirror_agentnexus_entries(user["user_id"], an_entries)
 
-    # 预置 source_index 指针示例（不深拷业务流水）
+    # source_index：指针路由到 NexusOps（不深拷流水）
     memory.upsert_source_index(
         user["user_id"],
         "machine:M102",
         aliases=["M102", "产线A那台", "WO-8842"],
         providers=[
-            {"provider": "mes", "resource": "machine_event_history", "hint": "machine_id=M102"},
+            {"provider": "nexusops", "resource": "machine", "hint": "q=M102"},
+            {"provider": "nexusops", "resource": "work_order", "hint": "q=WO-8842"},
             {"provider": "memory", "resource": "semantic", "hint": "belongs_to=line_A"},
-            {"provider": "agentnexus", "resource": "channel_memory", "hint": "q=WO-8842"},
+        ],
+    )
+    memory.upsert_source_index(
+        user["user_id"],
+        "line:A",
+        aliases=["产线A", "产线 A", "line-A"],
+        providers=[
+            {"provider": "nexusops", "resource": "line", "hint": "q=产线A"},
+            {"provider": "nexusops", "resource": "order", "hint": "q=ORD-20260915-01"},
+        ],
+    )
+    memory.upsert_source_index(
+        user["user_id"],
+        "order:ORD-20260915-01",
+        aliases=["ORD-20260915-01", "Shell-A7", "延误订单"],
+        providers=[
+            {"provider": "nexusops", "resource": "order", "hint": "q=ORD-20260915-01"},
         ],
     )
 
     hot_sids = {
         e.get("entry_id")
-        for e in mock_entries
+        for e in an_entries
         if e.get("include_in_hot", True) and e.get("entry_id")
     }
     hot_all = memory.list_hot_memory(user["user_id"], limit=24)
@@ -95,19 +133,36 @@ async def session_bootstrap(request: web.Request) -> web.Response:
         for h in hot_all
         if h.get("source") != "agentnexus" or h.get("source_id") in hot_sids
     ][:8]
+
+    an_cfg = agentnexus.load_config()
+    ops_cfg = nexusops.load_config()
     data = {
         "user_id": user["user_id"],
         "session_hint": f"S-{user['user_id']}",
         "user_profile": profile,
         "conversation_summary": {
-            "topics": ["M102温度告警", "今日排产", "OEE"],
-            "note": "用户是产线主管；昨天 M102 有温度告警并短暂停机，今天早班排产偏紧、想先确认设备再调产。",
+            "topics": ["今日待办", "M102", "ORD-20260915-01交期"],
+            "note": (
+                "用户是产线主管；个人日程/待办在 AgentNexus；"
+                "产线与订单实况在 NexusOps（M102 故障、ORD-20260915-01 延误风险）。"
+            ),
         },
         "hot_memory": hot,
-        "active_entities": [{"id": "machine:M102", "label": "M102"}],
-        "active_tasks": [{"id": "WO-8842", "label": "冷却风扇更换（需查 AgentNexus）"}],
+        "active_entities": [
+            {"id": "machine:M102", "label": "M102", "system": "nexusops"},
+            {"id": "order:ORD-20260915-01", "label": "ORD-20260915-01", "system": "nexusops"},
+            {"id": "todo:today", "label": "今日待办", "system": "agentnexus"},
+        ],
+        "active_tasks": [
+            {"id": "todo-wo-8842", "label": "跟进 WO-8842（待办→查 NexusOps）"},
+            {"id": "todo-ord-01", "label": "确认 ORD-20260915-01 是否延误"},
+        ],
         "phrase_stats": {"count": phrase_count()},
-        "agentnexus_seed_count": len(mock_entries),
+        "agentnexus_seed_count": len(an_entries),
+        "integrations": {
+            "agentnexus": {"mode": an_cfg.mode, "base_url": an_cfg.public_base_url},
+            "nexusops": {"mode": ops_cfg.mode, "base_url": ops_cfg.public_base_url},
+        },
     }
     return _api_ok(data)
 
@@ -130,18 +185,17 @@ async def context_query(request: web.Request) -> web.Response:
     options = body.get("options") or {}
     latency_budget_ms = int(options.get("latency_budget_ms") or 1500)
     max_results = int(options.get("max_results") or 10)
-    force_providers = options.get("providers")  # 质疑路径可强制
+    force_providers = options.get("providers")
 
     providers = force_providers or _plan_providers(query)
-    # 公开网页检索常 >1.5s；若规划了 websearch 且客户端预算过紧，抬到至少 6s
     if "websearch" in providers and latency_budget_ms < 6000:
         latency_budget_ms = 6000
 
     memory = get_memory_service()
-    mock_entries = agentnexus_mock.get_seed_memory(user["channel_id"])
+    an_entries = await _load_agentnexus_memory(user["channel_id"])
     mem_provider = MemoryProvider(
         memory,
-        agentnexus_entries=mock_entries,
+        agentnexus_entries=an_entries,
         channel_id=user["channel_id"],
     )
 
@@ -149,6 +203,11 @@ async def context_query(request: web.Request) -> web.Response:
         if "memory" not in providers:
             return []
         return await mem_provider.query(user["user_id"], query, max_results=max_results)
+
+    async def run_nexusops() -> list[dict[str, Any]]:
+        if "nexusops" not in providers:
+            return []
+        return await _nexusops.query(query, max_results=min(8, max_results))
 
     async def run_web() -> list[dict[str, Any]]:
         if "websearch" not in providers:
@@ -158,13 +217,13 @@ async def context_query(request: web.Request) -> web.Response:
     timed_out = False
     t0 = time.perf_counter()
     try:
-        mem_res, web_res = await asyncio.wait_for(
-            asyncio.gather(run_memory(), run_web()),
+        mem_res, ops_res, web_res = await asyncio.wait_for(
+            asyncio.gather(run_memory(), run_nexusops(), run_web()),
             timeout=max(latency_budget_ms, 200) / 1000.0,
         )
     except asyncio.TimeoutError:
         timed_out = True
-        mem_res, web_res = [], []
+        mem_res, ops_res, web_res = [], [], []
         try:
             mem_res = await asyncio.wait_for(run_memory(), timeout=0.05)
         except Exception:
@@ -172,7 +231,6 @@ async def context_query(request: web.Request) -> web.Response:
 
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
-    # Citation 分层 C：过滤无 citation 的 WebSearch「业务断言」
     usable_web = []
     rejected_web = 0
     web_errors = []
@@ -184,8 +242,11 @@ async def context_query(request: web.Request) -> web.Response:
             if item.get("freshness") == "error" or item.get("meta", {}).get("error"):
                 web_errors.append(str(item.get("text") or item.get("meta", {}).get("error") or "unknown"))
 
-    results = list(mem_res) + usable_web
+    # NexusOps 已在 Provider 内过滤无 citation
+    results = list(mem_res) + list(ops_res) + usable_web
     search_notes: list[str] = []
+    if "nexusops" in providers:
+        search_notes.append(f"NexusOps 返回 {len(ops_res)} 条运营事实。" if ops_res else "已查 NexusOps，暂无命中。")
     if "websearch" in providers:
         if timed_out and not usable_web:
             search_notes.append("已尝试公开网页检索（Tavily），但在时限内未返回结果。")
@@ -217,7 +278,7 @@ async def context_query(request: web.Request) -> web.Response:
 
 
 async def memory_event(request: web.Request) -> web.Response:
-    """写入/纠正长期记忆事件（save-intent、质疑回写）。"""
+    """写入/纠正长期记忆事件（save-intent、质疑回写）→ AgentNexus。"""
     try:
         user = auth.require_user(request)
     except web.HTTPUnauthorized:
@@ -257,13 +318,15 @@ async def memory_event(request: web.Request) -> web.Response:
         source_id=body.get("source_id"),
     )
 
-    # 同步尝试写入 AgentNexus Mock（结构化层）
     layer = (body.get("layer") or "PROGRESS").upper()
-    mock_entry = None
+    an_entry = None
     if layer in ("ANCHOR", "DECISIONS", "PROGRESS"):
-        mock_entry = agentnexus_mock.create_memory_entry(user["channel_id"], layer, text)
+        try:
+            an_entry = agentnexus.create_memory_entry(user["channel_id"], layer, text)
+        except Exception:
+            an_entry = None
 
-    return _api_ok({"entry": _public_row(row), "agentnexus": mock_entry})
+    return _api_ok({"entry": _public_row(row), "agentnexus": an_entry})
 
 
 def _public_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -280,7 +343,6 @@ def _public_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 async def phrase_pick(request: web.Request) -> web.Response:
-    """可选：服务端抽一条过渡语（前端也可本地库）。"""
     try:
         auth.require_user(request)
     except web.HTTPUnauthorized:

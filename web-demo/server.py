@@ -11,8 +11,8 @@ Run: python3 server.py   (reads QWEN_API_KEY etc. from ../.env)
 
 Binds to 127.0.0.1 by default (local-only, matches the docs above). Set HOST=0.0.0.0
 in .env only when fronting this with a tunnel/reverse proxy that needs to reach it
-from outside the machine. When doing that, also set PRODUCTION=1 to stop registering
-the AgentNexus mock routes (agentnexus_mock.py is seed-data-only, not meant to be
+from outside the machine. When doing that, also set PRODUCTION=1 (or AGENTNEXUS_MODE=real /
+NEXUSOPS_MODE=real) to stop registering local mock routes (seed-data-only, not meant to be
 reachable from outside).
 """
 import asyncio
@@ -25,9 +25,10 @@ import websockets
 from aiohttp import web, WSMsgType
 from dotenv import load_dotenv
 
-import agentnexus_mock
+import agentnexus
 import auth
 import context_gateway
+import nexusops
 from memory_service import get_memory_service
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -143,12 +144,26 @@ async def no_cache_static_middleware(request, handler):
 
 
 async def config(request):
+    an_cfg = agentnexus.load_config()
+    ops_cfg = nexusops.load_config()
     return web.json_response({
         "voice": QWEN_VOICE,
         "voices": VOICE_OPTIONS,
         "hasKey": bool(QWEN_API_KEY),
         "hasWorkspaceId": bool(QWEN_WORKSPACE_ID),
         "assetVersion": ASSET_VERSION,
+        "agentnexus": {
+            "mode": an_cfg.mode,
+            "baseURL": an_cfg.public_base_url,
+            "channelId": an_cfg.channel_id,
+            # Mock token only；real 模式由部署注入，勿把生产 token 写进仓库
+            "token": an_cfg.token if an_cfg.mode == "mock" else None,
+        },
+        "nexusops": {
+            "mode": ops_cfg.mode,
+            "baseURL": ops_cfg.public_base_url,
+            "token": ops_cfg.token if ops_cfg.mode == "mock" else None,
+        },
     })
 
 
@@ -281,14 +296,14 @@ async def memory_extract(request):
 
 
 async def on_startup(app: web.Application):
-    # 预热 LanceDB，并把 demo 种子镜像进 semantic（不深拷业务流水）
+    # 预热 LanceDB，并把 AgentNexus 个人记忆种子镜像进 semantic（不深拷 NexusOps 流水）
     try:
         mem = get_memory_service()
         for username, user in auth.USERS.items():
             mem.upsert_profile(user["user_id"], user["profile"])
-            seeds = agentnexus_mock.get_seed_memory(user["channel_id"])
+            seeds = agentnexus.get_seed_memory(user["channel_id"])
             n = mem.mirror_agentnexus_entries(user["user_id"], seeds)
-            print(f"MemoryService ready; mirrored {n} seed facts for {username}")
+            print(f"MemoryService ready; mirrored {n} AgentNexus facts for {username}")
     except Exception as e:
         print(f"MemoryService startup warning: {e}")
 
@@ -302,18 +317,26 @@ app.router.add_post("/api/memory-extract", memory_extract)
 app.router.add_get("/ws", relay)
 auth.register(app)
 context_gateway.register(app)
-if not PRODUCTION:
-    agentnexus_mock.register(app)
+_an_cfg = agentnexus.load_config()
+_ops_cfg = nexusops.load_config()
+if _an_cfg.use_mock_routes and not PRODUCTION:
+    agentnexus.register(app)
+if _ops_cfg.use_mock_routes and not PRODUCTION:
+    nexusops.register(app)
 app.router.add_static("/static/", BASE_DIR / "static")
 
 if __name__ == "__main__":
     domain_kind = "workspace-specific" if QWEN_WORKSPACE_ID else "shared (consider setting QWEN_WORKSPACE_ID)"
     print(f"Model: {QWEN_MODEL}  Voice: {QWEN_VOICE}  Key loaded: {bool(QWEN_API_KEY)}")
     print(f"Realtime endpoint: {upstream_ws_base()} [{domain_kind}]")
-    if PRODUCTION:
-        print("AgentNexus mock: disabled (PRODUCTION=1)")
+    if _an_cfg.use_mock_routes and not PRODUCTION:
+        print(f"AgentNexus mock: {_an_cfg.mock_prefix}/* (personal memory/schedule)")
     else:
-        print("AgentNexus mock: /agentnexus-mock/* (see agentnexus_mock.py)")
+        print(f"AgentNexus: mode={_an_cfg.mode} base={_an_cfg.base_url or '(unset)'}")
+    if _ops_cfg.use_mock_routes and not PRODUCTION:
+        print(f"NexusOps mock: {_ops_cfg.mock_prefix}/* (lines/orders/machines)")
+    else:
+        print(f"NexusOps: mode={_ops_cfg.mode} base={_ops_cfg.base_url or '(unset)'}")
     print("Auth: /api/auth/login|logout|me  Context: /api/session/bootstrap /api/context/query /api/memory/event")
     print(f"Listening on {HOST}:{PORT}")
     web.run_app(app, host=HOST, port=PORT)

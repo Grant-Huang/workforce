@@ -20,6 +20,50 @@ const TurnManager = (() => {
     return contextVersion;
   }
 
+  /** 等当前 response.create 对应的 response.done（responsePending→false），不 cancel。 */
+  function waitForResponseIdle(session, timeoutMs = 10000) {
+    if (!session.responsePending) return Promise.resolve(true);
+    const started = Date.now();
+    return new Promise((resolve) => {
+      const tick = () => {
+        if (!session.responsePending) {
+          resolve(true);
+          return;
+        }
+        if (Date.now() - started >= timeoutMs) {
+          resolve(false);
+          return;
+        }
+        setTimeout(tick, 40);
+      };
+      tick();
+    });
+  }
+
+  async function maybeChallengeRewrite(evalResult, queryData, user) {
+    if (evalResult.cls.kind !== "challenge" || !queryData || !(queryData.results || []).length) {
+      return;
+    }
+    const top = queryData.results.find((r) => r.provider === "memory") || queryData.results[0];
+    if (!top || !top.text) return;
+    try {
+      const saved = await ContextClient.memoryEvent({
+        type: "upsert",
+        text: top.text,
+        provenance: "challenge_refine",
+      });
+      if (saved.entry) {
+        await WorkingMemory.upsertHotMemory(user.user_id, {
+          id: saved.entry.id,
+          text: saved.entry.text,
+          source: saved.entry.source,
+        });
+      }
+    } catch (e) {
+      console.warn("challenge rewrite failed:", e);
+    }
+  }
+
   function classify(text) {
     const t = (text || "").trim();
     if (!t) return { kind: "empty", confidence: 0 };
@@ -28,13 +72,21 @@ const TurnManager = (() => {
       return { kind: "greeting", confidence: 0.95 };
     }
     if (SaveIntent.detect(t)) return { kind: "save_intent", confidence: 0.95 };
-    // 明显需要外部时效信息
-    if (/(天气|新闻|股价|最新|网上|联网|搜一下|搜一搜|搜索|查一下|查一查)/.test(t)) {
-      return { kind: "needs_retrieval", confidence: 0.35, scene: "retrieve_search" };
+    // 日程/待办 → AgentNexus（memory）
+    if (/(日程|待办|安排|会议|预约|帮我记|记住|偏好)/.test(t)) {
+      return { kind: "needs_retrieval", confidence: 0.35, scene: "retrieve_memory" };
     }
-    // 工单/备件/交接等细节默认不在 hot，走 AgentNexus Retrieval
-    if (/(WO-?\d+|工单|备件|FAN-M102|交接|SKU-|李工|王强|安全库存)/i.test(t)) {
+    // 产线/订单/设备等 → NexusOps（retrieve_record）
+    if (
+      /(产线|设备|订单|交期|延误|延期|故障|停机|维修|工单|物料|质量|OEE|排产|换型|备件|FAN-|SKU-|ORD-|WO-?\d+|M\d+)/i.test(
+        t
+      )
+    ) {
       return { kind: "needs_retrieval", confidence: 0.35, scene: "retrieve_record" };
+    }
+    // 明显需要外部时效信息
+    if (/(天气|新闻|股价|最新|网上|联网|搜一下|搜一搜|搜索)/.test(t)) {
+      return { kind: "needs_retrieval", confidence: 0.35, scene: "retrieve_search" };
     }
     return { kind: "general", confidence: 0.6 };
   }
@@ -249,19 +301,34 @@ const TurnManager = (() => {
     const phrase = TransitionPhrases.pick(evalResult.type === "B" ? "partial_bridge" : scene);
 
     const myVersion = version;
+    const sceneHint =
+      evalResult.scene || (evalResult.cls && evalResult.cls.scene) || null;
     const wantsWeb =
-      evalResult.scene === "retrieve_search" ||
-      (evalResult.cls && evalResult.cls.scene === "retrieve_search") ||
-      /(天气|新闻|股价|最新|网上|联网|搜一下|搜一搜|搜索|查一下)/.test(text);
+      sceneHint === "retrieve_search" ||
+      /(天气|新闻|股价|最新|网上|联网|搜一下|搜一搜|搜索)/.test(text);
+    const wantsOps =
+      sceneHint === "retrieve_record" ||
+      /(产线|设备|订单|交期|延误|故障|维修|工单|物料|质量|ORD-|WO-?\d+|M\d+)/i.test(text);
+    const wantsMemory =
+      sceneHint === "retrieve_memory" ||
+      /(日程|待办|安排|会议|记住|偏好|兴趣|角色)/.test(text);
     const latencyBudget = wantsWeb ? 6000 : 1500;
-    const providers =
-      evalResult.cls.kind === "challenge" || evalResult.forceRetrieval
-        ? ["memory", "websearch"]
-        : wantsWeb
-          ? ["websearch", "memory"]
-          : undefined;
+    let providers;
+    if (evalResult.cls.kind === "challenge" || evalResult.forceRetrieval) {
+      providers = ["memory", "nexusops", "websearch"];
+    } else if (wantsWeb) {
+      providers = ["websearch", "memory"];
+    } else if (wantsOps && wantsMemory) {
+      providers = ["nexusops", "memory"];
+    } else if (wantsOps) {
+      providers = ["nexusops"];
+    } else if (wantsMemory) {
+      providers = ["memory"];
+    } else {
+      providers = undefined;
+    }
 
-    // 先发起检索（AgentNexus mock 通常 <100ms；DDG 可能要数秒），与过渡语并行
+    // 检索：NexusOps/AgentNexus mock 通常很快；WebSearch 可能要数秒
     const queryPromise = ContextClient.queryContext({
       session_id: `S-${user.user_id}`,
       turn_id: turnId,
@@ -277,39 +344,54 @@ const TurnManager = (() => {
       return null;
     });
 
-    // 语音会话：禁止 Immediate→cancel→Refined（外放下极易表现为「自己打断自己」）
-    // 一律等检索（或预算耗尽）后一次性作答。
+    // 语音：先立刻播串场词（不 cancel），等 response.done + 检索完成后再播正式回答。
+    // 避免旧的 Immediate→cancel→Refined 自打断。
     if (session === voiceSession) {
+      const phraseExtra = `\n\n本轮需要检索。请只说下面这句过渡语（不要添加任何业务事实）：\n${phrase}`;
+      await session.updater.updateInstructionsAndWait(baseInstructions + phraseExtra, 2500);
+      if (!activeTurn || activeTurn.version !== myVersion) {
+        return { turnId, type: evalResult.type, path: "discarded" };
+      }
+      session.skipFinalizePersist = true;
+      markTurnTiming("sessionUpdatedAckAt");
+      sendEventOn(session.getWs(), { type: "response.create" });
+      markTurnTiming("responseCreateSentAt");
+      session.responsePending = true;
+
+      // 串场词播完（+短尾音缓冲）与检索并行；二者都就绪后再播正式答，全程不 cancel
+      const phraseDone = waitForResponseIdle(session, 10000).then(async (ok) => {
+        await new Promise((r) => setTimeout(r, 280));
+        return ok;
+      });
       const queryData = await Promise.race([
         queryPromise,
         new Promise((resolve) => setTimeout(() => resolve(null), latencyBudget + 200)),
       ]);
+      await phraseDone;
       if (!activeTurn || activeTurn.version !== myVersion) {
-        return { turnId, type: evalResult.type, path: "discarded" };
+        return { turnId, type: evalResult.type, path: "discarded_before_refined" };
       }
+
       const usable =
         queryData &&
         ((queryData.results || []).some((r) => r && r.text) ||
           ((queryData.search_notes || []).length > 0));
-      if (usable) {
-        const oneShot = buildRetrievalInstructions(baseInstructions, queryData, { voice: true });
-        await session.updater.updateInstructionsAndWait(oneShot, 2500);
-        if (session === voiceSession) markTurnTiming("sessionUpdatedAckAt");
-        sendEventOn(session.getWs(), { type: "response.create" });
-        if (session === voiceSession) markTurnTiming("responseCreateSentAt");
-        session.responsePending = true;
-        return { turnId, type: evalResult.type, path: "voice_oneshot", queryData };
+      if (!usable) {
+        // 串场词已作为 Immediate 播出；超时不再二次出声
+        return { turnId, type: evalResult.type, path: "voice_timeout_phrase_only", timedOut: true };
       }
-      // 超时/无结果：只说一句过渡，不再二次 cancel
-      await session.updater.updateInstructionsAndWait(
-        `${baseInstructions}\n\n本轮公开检索未及时完成。请只说：${phrase}。不要说「我没法搜网络」。`,
-        2500
-      );
-      if (session === voiceSession) markTurnTiming("sessionUpdatedAckAt");
+
+      const refined = buildRetrievalInstructions(baseInstructions, queryData, { voice: true });
+      await session.updater.updateInstructionsAndWait(refined, 2500);
+      if (!activeTurn || activeTurn.version !== myVersion) {
+        return { turnId, type: evalResult.type, path: "discarded" };
+      }
+      markTurnTiming("sessionUpdatedAckAt");
       sendEventOn(session.getWs(), { type: "response.create" });
-      if (session === voiceSession) markTurnTiming("responseCreateSentAt");
+      markTurnTiming("responseCreateSentAt");
       session.responsePending = true;
-      return { turnId, type: evalResult.type, path: "voice_timeout_phrase", timedOut: true };
+      await maybeChallengeRewrite(evalResult, queryData, user);
+      return { turnId, type: evalResult.type, path: "voice_phrase_then_answer", queryData };
     }
 
     // 快查直出：本地 Memory 很快有结果时，跳过过渡语 + 取消/再播，避免双次 session.update 卡住
@@ -386,28 +468,7 @@ const TurnManager = (() => {
     sendEventOn(session.getWs(), { type: "response.create" });
     session.responsePending = true;
 
-    // 质疑回写
-    if (evalResult.cls.kind === "challenge" && queryData && (queryData.results || []).length) {
-      const top = queryData.results.find((r) => r.provider === "memory") || queryData.results[0];
-      if (top && top.text) {
-        try {
-          const saved = await ContextClient.memoryEvent({
-            type: "upsert",
-            text: top.text,
-            provenance: "challenge_refine",
-          });
-          if (saved.entry) {
-            await WorkingMemory.upsertHotMemory(user.user_id, {
-              id: saved.entry.id,
-              text: saved.entry.text,
-              source: saved.entry.source,
-            });
-          }
-        } catch (e) {
-          console.warn("challenge rewrite failed:", e);
-        }
-      }
-    }
+    await maybeChallengeRewrite(evalResult, queryData, user);
 
     return { turnId, type: evalResult.type, path: "refined", queryData };
   }

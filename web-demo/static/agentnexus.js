@@ -1,20 +1,33 @@
-// Bridges LocalMemory to AgentNexus's memory API — pointed at the local mock by
-// default (see server.py's /agentnexus-mock/* routes), which stands in for what
-// AgentNexus looks like *after* the changes proposed in
-// docs/agentnexus-memory-integration-proposal.md: a long-lived bearer token works
-// on the plain memory/messages REST API, no special auth dance needed.
+// Bridges LocalMemory to AgentNexus's memory API — personal memory / schedule / todos.
+// Default: local mock at /agentnexus-mock/* (see web-demo/agentnexus/).
+// Switch via /api/config → agentnexus.baseURL when AGENTNEXUS_MODE=real.
 //
-// Short HTTPS calls only, no persistent connection — pull once when a conversation
-// starts, push new turns in the background. LocalMemory stays the only thing the
-// live conversation reads from.
+// Ops facts (lines/orders/machines) are NOT here — see NexusOps + docs/capability-map.md.
 const AgentNexusBridge = (() => {
   const config = {
     baseURL: "/agentnexus-mock",
     channelId: "demo-channel",
-    // Mock accepts any non-empty bearer token — stands in for a pt_... personal
-    // token once AgentNexus's generic auth accepts those (proposal §2).
     token: "pt_mock_demo_token",
   };
+
+  let configLoaded = false;
+
+  async function ensureConfig() {
+    if (configLoaded) return;
+    try {
+      const res = await fetch("/api/config");
+      if (res.ok) {
+        const data = await res.json();
+        const an = data.agentnexus || {};
+        if (an.baseURL) config.baseURL = an.baseURL;
+        if (an.channelId) config.channelId = an.channelId;
+        if (an.token) config.token = an.token;
+      }
+    } catch (e) {
+      console.warn("AgentNexus config load failed, using defaults:", e);
+    }
+    configLoaded = true;
+  }
 
   function headers() {
     return {
@@ -24,6 +37,7 @@ const AgentNexusBridge = (() => {
   }
 
   async function pullMemory() {
+    await ensureConfig();
     try {
       const res = await fetch(`${config.baseURL}/api/v1/channels/${config.channelId}/memory/`, {
         headers: headers(),
@@ -32,11 +46,6 @@ const AgentNexusBridge = (() => {
       const remoteEntries = await res.json();
       LocalMemory.merge(
         remoteEntries.map((e) => ({
-          // `id` stays the string-concat form for now -- LocalMemory.merge's dedup is
-          // still keyed on `id` in this phase (see its doc comment), so changing this
-          // would break dedup. `sourceId` is the new, formal field Phase 2's upsert
-          // logic will actually key on; both point at the same underlying entry_id
-          // deliberately, this isn't two different ids.
           id: `agentnexus:${e.entry_id}`,
           text: e.title ? `${e.title}：${e.content}` : e.content,
           timestamp: e.updated_at ? Date.parse(e.updated_at) : Date.now(),
@@ -52,14 +61,8 @@ const AgentNexusBridge = (() => {
     }
   }
 
-  /**
-   * Pushes a raw conversation turn as a channel message. Used to be fire-and-forget
-   * (swallowed its own errors) -- now throws on failure so callers can track sync
-   * status and retry, instead of a failed push silently vanishing with no local trace
-   * (docs/roadmap-todo.md, "记忆" section, item 4). See history.js's ConversationHistory,
-   * the only caller, for the retry side of this.
-   */
   async function pushMessage(text, senderType = "user") {
+    await ensureConfig();
     const res = await fetch(`${config.baseURL}/api/v1/channels/${config.channelId}/messages`, {
       method: "POST",
       headers: headers(),
@@ -69,14 +72,8 @@ const AgentNexusBridge = (() => {
     return res.json();
   }
 
-  /**
-   * Writes a curated memory entry (not raw dialogue) into one of the structured
-   * layers — used when the user explicitly asks to remember something, per
-   * docs/agentnexus-memory-integration-proposal.md's "raw dialogue vs curated
-   * memory" split. Awaited (unlike pushMessage) so the caller can confirm success
-   * before telling the user it's saved.
-   */
   async function createMemoryEntry(layer, content) {
+    await ensureConfig();
     const res = await fetch(`${config.baseURL}/api/v1/channels/${config.channelId}/memory/`, {
       method: "POST",
       headers: headers(),
@@ -86,5 +83,5 @@ const AgentNexusBridge = (() => {
     return res.json();
   }
 
-  return { config, pullMemory, pushMessage, createMemoryEntry };
+  return { config, ensureConfig, pullMemory, pushMessage, createMemoryEntry };
 })();

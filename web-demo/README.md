@@ -7,7 +7,8 @@
 ## 本地记忆 + AgentNexus Mock
 
 - `static/memory.js`：本地记忆（`localStorage`），跟 `VoiceChat/Memory/MemoryStore.swift` 同一套逻辑——关键词重合度 + 时间新鲜度打分，没有语义检索。
-- `static/agentnexus.js` + `agentnexus_mock.py`：**Mock 出智枢按 `docs/agentnexus-memory-integration-proposal.md` 改完之后的样子**——长期 Token 直接能用（mock 里任何非空 Bearer token 都算通过）、标准的频道记忆/消息 REST API。默认指向本地的 `/agentnexus-mock/*`（内置了三条示例记忆种子数据），生产环境要换成真实智枢地址时只需要改 `agentnexus.js` 里的 `config`。
+- `static/agentnexus.js` + `agentnexus/`：**个人记忆 / 日程 / 待办** Mock（Bearer Token、频道 memory API）。默认 `/agentnexus-mock/*`；`AGENTNEXUS_MODE=real` 可整体切换。运营事实不在此包。
+- `nexusops/`：**产线 / 设备 / 订单 / 物料 / 质量 / 维修** Mock。默认 `/nexusops-mock/*`；见 `docs/capability-map.md`。
 - 每次开始对话，先从 AgentNexus Mock 拉一次记忆合并进本地缓存；对话过程中每一轮（不管是打字还是说话）都用本地记忆检索，命中的话会喂给模型；原始对话内容顺带推给 AgentNexus 当消息记录。
 - `static/saveIntent.js`：识别"记住""帮我记一下""提醒我"这类明确意图，命中的话**不**走普通的检索问答流程，而是把内容写进 AgentNexus 的结构化记忆层（`PROGRESS`，通过 `agentnexus.js` 的 `createMemoryEntry`），模型只需要简短确认，不用检索/复述。跟"每轮对话都当消息推送"是两条不同的路径，对应提案文档里"原始对话 vs 精选记忆"的分工。
 
@@ -199,7 +200,8 @@ Sources: [限流文档](https://help.aliyun.com/zh/model-studio/rate-limit) · [
 ## 文件说明
 
 - `server.py` — 中转服务（aiohttp）：serve 静态文件 + `/api/config` + `/ws`（转发到 DashScope）+ 挂载 AgentNexus Mock 路由。
-- `agentnexus_mock.py` — Mock 出智枢按提案改完之后的记忆/消息 REST API，纯内存存储，重启会重置回种子数据。
+- `agentnexus/` — 智枢 Mock 包（日程/待办/个人记忆）；`agentnexus_mock.py` 为兼容旧 import 的薄包装。
+- `nexusops/` — NexusOps Mock 包（产线/订单/设备等运营事实，结果带 citation）。
 - `index.html` / `static/styles.css` — 页面结构和样式（开始/结束合一按钮、文字输入框）。
 - `static/app.js` — 核心逻辑：麦克风采集（`ScriptProcessorNode`，降采样到 16kHz PCM16）、流式播放（24kHz PCM16 顺序调度播放）、WebSocket 事件收发、`session.update` instructions patch 记忆注入、气泡渲染。
 - `static/memory.js` — 本地记忆存储 + 检索。

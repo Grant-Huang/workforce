@@ -1,14 +1,15 @@
-"""MemoryProvider：从 LanceDB + AgentNexus Mock 取个人/偏好类上下文。
+"""MemoryProvider：从 LanceDB + AgentNexus 取个人/偏好类上下文。
 
 Citation 分层 C：Memory/Profile 可无 citation。
-主动查询：优先 live 检索 AgentNexus Mock（真相源），再补 LanceDB 镜像命中。
+主动查询：优先 live 检索 AgentNexus（真相源），再补 LanceDB 镜像命中。
 镜像只在 bootstrap/启动时做，查询路径不再全量 delete+add（避免拖慢 / 阻塞事件循环）。
 """
 from __future__ import annotations
 
 from typing import Any
 
-import agentnexus_mock
+import agentnexus
+from agentnexus.client import HttpClient
 from memory_service import MemoryService
 
 
@@ -36,9 +37,17 @@ class MemoryProvider:
         results: list[dict[str, Any]] = []
         seen_texts: set[str] = set()
 
-        # 1) 主动查 AgentNexus Mock（进程内 = 与 REST ?q= 同一套 search_memory）
-        for e in agentnexus_mock.search_memory(self.channel_id, query, limit=max_results):
-            text = agentnexus_mock.entry_to_text(e)
+        client = agentnexus.get_client()
+        # 1) 主动查 AgentNexus（Mock 进程内 / Real HTTP ?q=）
+        if isinstance(client, HttpClient):
+            live_entries = await client.search_memory_remote(
+                self.channel_id, query, limit=max_results
+            )
+        else:
+            live_entries = client.search_memory(self.channel_id, query, limit=max_results)
+
+        for e in live_entries:
+            text = agentnexus.entry_to_text(e)
             if not text.strip() or text in seen_texts:
                 continue
             seen_texts.add(text)
@@ -48,7 +57,7 @@ class MemoryProvider:
                     "source": "agentnexus",
                     "text": text,
                     "confidence": 0.88,
-                    "freshness": "live_mock",
+                    "freshness": "live_mock" if not isinstance(client, HttpClient) else "live",
                     "citation": None,
                     "meta": {
                         "id": e.get("entry_id"),

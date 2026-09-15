@@ -148,6 +148,15 @@ PRODUCTION=0 python -u server.py  # 默认 127.0.0.1:8765；勿设 PRODUCTION=1 
 2. 打字「你好呀」→ 应按产线主管 / 设备异常·排产 引导
 3. 问「我负责什么 / M102」→ Memory 命中
 4. 问「今天有什么科技新闻」→ WebSearch + citation
+5. 问「今天日程/待办」→ AgentNexus（memory）
+6. 问「产线情况 / 订单是否延误」→ NexusOps（须有 citation）
+
+### 能力地图补充（Mock 可切换）
+
+- [x] `docs/capability-map.md`：AgentNexus / NexusOps / CRM 职责
+- [x] `web-demo/agentnexus/`：个人记忆 Mock，可 `AGENTNEXUS_MODE=real` 切换
+- [x] `web-demo/nexusops/`：运营事实 Mock，可 `NEXUSOPS_MODE=real` 切换
+- [x] 对接文档：`docs/agentnexus-external-api.md`、`docs/nexusops-external-api.md`
 
 ### 端到端验收清单
 
