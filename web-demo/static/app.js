@@ -128,6 +128,7 @@ function setState(next, statusOverride, opts = {}) {
       clearEchoUnmuteTimer();
       echoGuardUntil = 0;
       micSendEnabled = true;
+      stopLocalBargeWatch();
     } else {
       armEchoCooldown();
     }
@@ -135,6 +136,7 @@ function setState(next, statusOverride, opts = {}) {
     clearEchoUnmuteTimer();
     echoGuardUntil = 0;
     micSendEnabled = true;
+    stopLocalBargeWatch();
   }
 }
 
@@ -386,10 +388,18 @@ const BARGE_IN_CONFIRM_MS = 450;
 const BARGE_IN_CONFIRM_LEVEL = 0.18; // same 0-1 scale as readAnalyserLevel()
 // 外放时浏览器 AEC 常压不住回声：播放期间停传麦克风，结束后再冷却一会，
 // 否则助手自己的声音会被当成用户打断/新一轮输入（真机 Chrome 外放复现）。
+// 打断改由本地能量检测（mic ≫ play）触发，不依赖服务端 VAD。
 const ECHO_COOLDOWN_MS = 1100;
+const LOCAL_BARGE_MS = 380;
+const LOCAL_BARGE_LEVEL = 0.2;
+const LOCAL_BARGE_OVER_PLAY = 0.12;
+const LOCAL_BARGE_GRACE_MS = 280; // 开播瞬间回声尖峰不计入
 let micSendEnabled = true;
 let echoGuardUntil = 0;
 let echoUnmuteTimer = null;
+let localBargeRaf = null;
+let localBargeSpeakingSince = 0;
+let localBargeHits = [];
 
 function clearEchoUnmuteTimer() {
   if (echoUnmuteTimer) {
@@ -398,16 +408,55 @@ function clearEchoUnmuteTimer() {
   }
 }
 
+function stopLocalBargeWatch() {
+  if (localBargeRaf) {
+    cancelAnimationFrame(localBargeRaf);
+    localBargeRaf = null;
+  }
+  localBargeHits = [];
+}
+
+function tickLocalBargeWatch() {
+  localBargeRaf = null;
+  if (state !== STATE.SPEAKING) return;
+  const elapsed = performance.now() - localBargeSpeakingSince;
+  if (elapsed >= LOCAL_BARGE_GRACE_MS && micAnalyser) {
+    const mic = readAnalyserLevel(micAnalyser);
+    const play = readAnalyserLevel(playAnalyser);
+    const hit = mic >= LOCAL_BARGE_LEVEL && mic > play + LOCAL_BARGE_OVER_PLAY;
+    localBargeHits.push({ t: performance.now(), hit });
+    const cutoff = performance.now() - LOCAL_BARGE_MS;
+    localBargeHits = localBargeHits.filter((s) => s.t >= cutoff);
+    if (localBargeHits.length >= 4) {
+      const ratio = localBargeHits.filter((s) => s.hit).length / localBargeHits.length;
+      if (ratio >= 0.7) {
+        console.info("local barge-in (mic≫play), cancel assistant playback");
+        handleBargeIn();
+        return;
+      }
+    }
+  }
+  localBargeRaf = requestAnimationFrame(tickLocalBargeWatch);
+}
+
+function startLocalBargeWatch() {
+  stopLocalBargeWatch();
+  localBargeSpeakingSince = performance.now();
+  localBargeRaf = requestAnimationFrame(tickLocalBargeWatch);
+}
+
 function enterSpeakingEchoGuard() {
   micSendEnabled = false;
   clearEchoUnmuteTimer();
   // 清掉服务端已缓冲的回声尾音，避免 SPEAKING 刚开始就触发 speech_started
   sendEvent({ type: "input_audio_buffer.clear" });
+  startLocalBargeWatch();
 }
 
 function armEchoCooldown(ms = ECHO_COOLDOWN_MS) {
   micSendEnabled = false;
   echoGuardUntil = performance.now() + ms;
+  stopLocalBargeWatch();
   clearEchoUnmuteTimer();
   echoUnmuteTimer = setTimeout(() => {
     echoUnmuteTimer = null;
