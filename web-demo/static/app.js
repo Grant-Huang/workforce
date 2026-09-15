@@ -125,18 +125,18 @@ function setState(next, statusOverride, opts = {}) {
     enterSpeakingEchoGuard();
   } else if (next === STATE.LISTENING && prev === STATE.SPEAKING) {
     if (opts.afterBargeIn) {
+      stopDoubleTalkWatch();
       clearEchoUnmuteTimer();
       echoGuardUntil = 0;
       micSendEnabled = true;
-      stopLocalBargeWatch();
     } else {
       armEchoCooldown();
     }
   } else if (next === STATE.IDLE) {
+    stopDoubleTalkWatch();
     clearEchoUnmuteTimer();
     echoGuardUntil = 0;
     micSendEnabled = true;
-    stopLocalBargeWatch();
   }
 }
 
@@ -386,20 +386,20 @@ function readAnalyserLevel(analyser) {
 // confirmation and likely adjustment.
 const BARGE_IN_CONFIRM_MS = 450;
 const BARGE_IN_CONFIRM_LEVEL = 0.18; // same 0-1 scale as readAnalyserLevel()
-// 外放时浏览器 AEC 常压不住回声：播放期间停传麦克风，结束后再冷却一会，
+// 外放时浏览器 AEC 常压不住回声：播放期间默认停传麦克风，结束后再冷却一会，
 // 否则助手自己的声音会被当成用户打断/新一轮输入（真机 Chrome 外放复现）。
-// 打断改由本地能量检测（mic ≫ play）触发，不依赖服务端 VAD。
+// 打断改走「本地双讲开门」：本地比较 mic vs playback，只有人声明显盖过播放才开传并 cancel。
 const ECHO_COOLDOWN_MS = 1100;
-const LOCAL_BARGE_MS = 380;
-const LOCAL_BARGE_LEVEL = 0.2;
-const LOCAL_BARGE_OVER_PLAY = 0.12;
-const LOCAL_BARGE_GRACE_MS = 280; // 开播瞬间回声尖峰不计入
+const DOUBLE_TALK_MARGIN = 0.12; // mic 需高于 play 的余量
+const DOUBLE_TALK_MIN_MIC = 0.2;
+const DOUBLE_TALK_HOLD_MS = 350;
+const DOUBLE_TALK_HIT_RATIO = 0.65;
 let micSendEnabled = true;
 let echoGuardUntil = 0;
 let echoUnmuteTimer = null;
-let localBargeRaf = null;
-let localBargeSpeakingSince = 0;
-let localBargeHits = [];
+let doubleTalkRaf = null;
+let doubleTalkHits = [];
+let doubleTalkArmed = false;
 
 function clearEchoUnmuteTimer() {
   if (echoUnmuteTimer) {
@@ -408,41 +408,50 @@ function clearEchoUnmuteTimer() {
   }
 }
 
-function stopLocalBargeWatch() {
-  if (localBargeRaf) {
-    cancelAnimationFrame(localBargeRaf);
-    localBargeRaf = null;
+function stopDoubleTalkWatch() {
+  if (doubleTalkRaf) {
+    cancelAnimationFrame(doubleTalkRaf);
+    doubleTalkRaf = null;
   }
-  localBargeHits = [];
+  doubleTalkHits = [];
+  doubleTalkArmed = false;
 }
 
-function tickLocalBargeWatch() {
-  localBargeRaf = null;
-  if (state !== STATE.SPEAKING) return;
-  const elapsed = performance.now() - localBargeSpeakingSince;
-  if (elapsed >= LOCAL_BARGE_GRACE_MS && micAnalyser) {
-    const mic = readAnalyserLevel(micAnalyser);
-    const play = readAnalyserLevel(playAnalyser);
-    const hit = mic >= LOCAL_BARGE_LEVEL && mic > play + LOCAL_BARGE_OVER_PLAY;
-    localBargeHits.push({ t: performance.now(), hit });
-    const cutoff = performance.now() - LOCAL_BARGE_MS;
-    localBargeHits = localBargeHits.filter((s) => s.t >= cutoff);
-    if (localBargeHits.length >= 4) {
-      const ratio = localBargeHits.filter((s) => s.hit).length / localBargeHits.length;
-      if (ratio >= 0.7) {
-        console.info("local barge-in (mic≫play), cancel assistant playback");
-        handleBargeIn();
-        return;
-      }
+function sampleLooksLikeDoubleTalk() {
+  const mic = readAnalyserLevel(micAnalyser);
+  const play = readAnalyserLevel(playAnalyser);
+  return mic >= DOUBLE_TALK_MIN_MIC && mic > play + DOUBLE_TALK_MARGIN;
+}
+
+function tickDoubleTalkWatch() {
+  doubleTalkRaf = null;
+  if (state !== STATE.SPEAKING || !doubleTalkArmed) return;
+
+  doubleTalkHits.push(sampleLooksLikeDoubleTalk() ? 1 : 0);
+  // 只保留最近 DOUBLE_TALK_HOLD_MS 窗口（按 ~60fps 估样本数）
+  const maxSamples = Math.max(8, Math.round(DOUBLE_TALK_HOLD_MS / 16));
+  if (doubleTalkHits.length > maxSamples) {
+    doubleTalkHits = doubleTalkHits.slice(-maxSamples);
+  }
+
+  if (doubleTalkHits.length >= maxSamples) {
+    const avg = doubleTalkHits.reduce((a, b) => a + b, 0) / doubleTalkHits.length;
+    if (avg >= DOUBLE_TALK_HIT_RATIO) {
+      console.info("local double-talk barge-in");
+      stopDoubleTalkWatch();
+      handleBargeIn();
+      return;
     }
   }
-  localBargeRaf = requestAnimationFrame(tickLocalBargeWatch);
+
+  doubleTalkRaf = requestAnimationFrame(tickDoubleTalkWatch);
 }
 
-function startLocalBargeWatch() {
-  stopLocalBargeWatch();
-  localBargeSpeakingSince = performance.now();
-  localBargeRaf = requestAnimationFrame(tickLocalBargeWatch);
+function startDoubleTalkWatch() {
+  stopDoubleTalkWatch();
+  if (!micAnalyser) return;
+  doubleTalkArmed = true;
+  doubleTalkRaf = requestAnimationFrame(tickDoubleTalkWatch);
 }
 
 function enterSpeakingEchoGuard() {
@@ -450,13 +459,14 @@ function enterSpeakingEchoGuard() {
   clearEchoUnmuteTimer();
   // 清掉服务端已缓冲的回声尾音，避免 SPEAKING 刚开始就触发 speech_started
   sendEvent({ type: "input_audio_buffer.clear" });
-  startLocalBargeWatch();
+  // 播放期不上传麦，但本地继续听：双讲成立再开门打断
+  startDoubleTalkWatch();
 }
 
 function armEchoCooldown(ms = ECHO_COOLDOWN_MS) {
+  stopDoubleTalkWatch();
   micSendEnabled = false;
   echoGuardUntil = performance.now() + ms;
-  stopLocalBargeWatch();
   clearEchoUnmuteTimer();
   echoUnmuteTimer = setTimeout(() => {
     echoUnmuteTimer = null;
@@ -778,8 +788,14 @@ async function handleUserTurn(rawText, session) {
 }
 
 function handleBargeIn() {
+  stopDoubleTalkWatch();
   stopPlayback();
   sendEvent({ type: "response.cancel" });
+  // 开门：立刻恢复上传，让后续真人话语能进服务端 VAD/转写
+  clearEchoUnmuteTimer();
+  echoGuardUntil = 0;
+  micSendEnabled = true;
+  sendEvent({ type: "input_audio_buffer.clear" });
   voiceSession.responsePending = false;
   TurnManager.invalidate();
   assistantBubbleEl = null;
@@ -843,8 +859,10 @@ function handleServerEvent(json) {
         break;
       }
 
-      // 播放期已停传麦克风时，speech_started 仍可能来自停传前缓冲——一律按回声确认门处理
+      // 播放期主路径是本地双讲开门；若仍收到 speech_started（停传前缓冲），
+      // 再用同一套 mic>>play 门确认，避免回声误打断。
       if (state === STATE.SPEAKING || isEchoGuardActive()) {
+        if (state !== STATE.SPEAKING) break;
         confirmSustainedMicLevel(micAnalyser, BARGE_IN_CONFIRM_MS, BARGE_IN_CONFIRM_LEVEL).then((confirmed) => {
           if (confirmed && state === STATE.SPEAKING) handleBargeIn();
         });
