@@ -249,6 +249,40 @@ const TurnManager = (() => {
       return null;
     });
 
+    // 语音会话：禁止 Immediate→cancel→Refined（外放下极易表现为「自己打断自己」）
+    // 一律等检索（或预算耗尽）后一次性作答。
+    if (session === voiceSession) {
+      const queryData = await Promise.race([
+        queryPromise,
+        new Promise((resolve) => setTimeout(() => resolve(null), latencyBudget + 200)),
+      ]);
+      if (!activeTurn || activeTurn.version !== myVersion) {
+        return { turnId, type: evalResult.type, path: "discarded" };
+      }
+      const usable =
+        queryData && !queryData.timed_out && (queryData.results || []).some((r) => r && r.text);
+      if (usable) {
+        const ctxBlock = formatContextBlock(queryData.results);
+        const oneShot = `${baseInstructions}\n\n检索已完成（来自 Memory/AgentNexus）。请直接口语简短回答，依据下列 Context；不要编造。WebSearch 条目必须有来源才可当事实。\n${ctxBlock}`;
+        await session.updater.updateInstructionsAndWait(oneShot, 2500);
+        if (session === voiceSession) markTurnTiming("sessionUpdatedAckAt");
+        sendEventOn(session.getWs(), { type: "response.create" });
+        if (session === voiceSession) markTurnTiming("responseCreateSentAt");
+        session.responsePending = true;
+        return { turnId, type: evalResult.type, path: "voice_oneshot", queryData };
+      }
+      // 超时/无结果：只说一句过渡，不再二次 cancel
+      await session.updater.updateInstructionsAndWait(
+        `${baseInstructions}\n\n本轮检索未及时完成。请只说：${phrase}`,
+        2500
+      );
+      if (session === voiceSession) markTurnTiming("sessionUpdatedAckAt");
+      sendEventOn(session.getWs(), { type: "response.create" });
+      if (session === voiceSession) markTurnTiming("responseCreateSentAt");
+      session.responsePending = true;
+      return { turnId, type: evalResult.type, path: "voice_timeout_phrase", timedOut: true };
+    }
+
     // 快查直出：本地 Memory 很快有结果时，跳过过渡语 + 取消/再播，避免双次 session.update 卡住
     const FAST_MS = 400;
     const raced = await Promise.race([

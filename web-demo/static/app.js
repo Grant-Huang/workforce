@@ -83,7 +83,8 @@ function clearIdleTimer() {
   }
 }
 
-function setState(next, statusOverride) {
+function setState(next, statusOverride, opts = {}) {
+  const prev = state;
   state = next;
   const label = {
     [STATE.IDLE]: "未连接",
@@ -117,6 +118,23 @@ function setState(next, statusOverride) {
   if (next !== STATE.CONNECTING && connectTimeoutId) {
     clearTimeout(connectTimeoutId);
     connectTimeoutId = null;
+  }
+
+  // 外放回声防护：说话时停传麦；正常说完后冷却；真打断则立刻开麦
+  if (next === STATE.SPEAKING && prev !== STATE.SPEAKING) {
+    enterSpeakingEchoGuard();
+  } else if (next === STATE.LISTENING && prev === STATE.SPEAKING) {
+    if (opts.afterBargeIn) {
+      clearEchoUnmuteTimer();
+      echoGuardUntil = 0;
+      micSendEnabled = true;
+    } else {
+      armEchoCooldown();
+    }
+  } else if (next === STATE.IDLE) {
+    clearEchoUnmuteTimer();
+    echoGuardUntil = 0;
+    micSendEnabled = true;
   }
 }
 
@@ -364,8 +382,42 @@ function readAnalyserLevel(analyser) {
 // longer to register. Neither constant is acoustically tuned (no real audio hardware in
 // this sandbox, same caveat as every playback/echo fix in this file) -- needs real-device
 // confirmation and likely adjustment.
-const BARGE_IN_CONFIRM_MS = 250;
-const BARGE_IN_CONFIRM_LEVEL = 0.12; // same 0-1 scale as readAnalyserLevel()
+const BARGE_IN_CONFIRM_MS = 450;
+const BARGE_IN_CONFIRM_LEVEL = 0.18; // same 0-1 scale as readAnalyserLevel()
+// 外放时浏览器 AEC 常压不住回声：播放期间停传麦克风，结束后再冷却一会，
+// 否则助手自己的声音会被当成用户打断/新一轮输入（真机 Chrome 外放复现）。
+const ECHO_COOLDOWN_MS = 1100;
+let micSendEnabled = true;
+let echoGuardUntil = 0;
+let echoUnmuteTimer = null;
+
+function clearEchoUnmuteTimer() {
+  if (echoUnmuteTimer) {
+    clearTimeout(echoUnmuteTimer);
+    echoUnmuteTimer = null;
+  }
+}
+
+function enterSpeakingEchoGuard() {
+  micSendEnabled = false;
+  clearEchoUnmuteTimer();
+  // 清掉服务端已缓冲的回声尾音，避免 SPEAKING 刚开始就触发 speech_started
+  sendEvent({ type: "input_audio_buffer.clear" });
+}
+
+function armEchoCooldown(ms = ECHO_COOLDOWN_MS) {
+  micSendEnabled = false;
+  echoGuardUntil = performance.now() + ms;
+  clearEchoUnmuteTimer();
+  echoUnmuteTimer = setTimeout(() => {
+    echoUnmuteTimer = null;
+    if (state === STATE.LISTENING) micSendEnabled = true;
+  }, ms);
+}
+
+function isEchoGuardActive() {
+  return !micSendEnabled || performance.now() < echoGuardUntil;
+}
 
 // Real-device report (2026-08-25) clarified that "前后重叠" didn't mean overlapping
 // *audio* (the response-cancel fix already prevents that) -- it meant the assistant
@@ -447,10 +499,14 @@ function confirmSustainedMicLevel(analyser, durationMs, level) {
     const samples = [];
     const start = performance.now();
     const sample = () => {
-      samples.push(readAnalyserLevel(analyser));
+      const mic = readAnalyserLevel(analyser);
+      const play = state === STATE.SPEAKING ? readAnalyserLevel(playAnalyser) : 0;
+      // 外放时要求麦克风能量明显高于当前播放，才算真打断（压住回声尖峰）
+      const overPlay = mic > play + 0.1;
+      samples.push(overPlay && mic >= level ? 1 : 0);
       if (performance.now() - start >= durationMs) {
-        const avg = samples.reduce((a, b) => a + b, 0) / samples.length;
-        resolve(avg >= level);
+        const avg = samples.reduce((a, b) => a + b, 0) / Math.max(samples.length, 1);
+        resolve(avg >= 0.65);
         return;
       }
       requestAnimationFrame(sample);
@@ -679,7 +735,7 @@ function handleBargeIn() {
   TurnManager.invalidate();
   assistantBubbleEl = null;
   assistantHasDelta = false;
-  setState(STATE.LISTENING);
+  setState(STATE.LISTENING, undefined, { afterBargeIn: true });
 }
 
 function handleServerEvent(json) {
@@ -708,6 +764,11 @@ function handleServerEvent(json) {
       setAssistantFinalText(json.transcript || "");
       break;
     case "conversation.item.input_audio_transcription.completed":
+      // 播放中/回声冷却期内的转写多半是助手自己的外放被麦收到——丢掉，不当作用户轮次
+      if (json.transcript && isEchoGuardActive()) {
+        console.info("drop likely-echo transcript:", json.transcript);
+        break;
+      }
       if (json.transcript) {
         addBubble("user", json.transcript);
         voiceTurnTiming = { transcriptAt: performance.now() };
@@ -733,14 +794,9 @@ function handleServerEvent(json) {
         break;
       }
 
-      // Only gated by confirmSustainedMicLevel while the assistant is actually SPEAKING
-      // -- see that function's doc comment. A normal turn-start (assistant already
-      // silent) has no echo to false-trigger from, so it's confirmed immediately, same
-      // as before this change.
-      if (state === STATE.SPEAKING) {
+      // 播放期已停传麦克风时，speech_started 仍可能来自停传前缓冲——一律按回声确认门处理
+      if (state === STATE.SPEAKING || isEchoGuardActive()) {
         confirmSustainedMicLevel(micAnalyser, BARGE_IN_CONFIRM_MS, BARGE_IN_CONFIRM_LEVEL).then((confirmed) => {
-          // Re-check state: the assistant may have already finished on its own (or the
-          // user may have hung up) during the confirmation window.
           if (confirmed && state === STATE.SPEAKING) handleBargeIn();
         });
       } else {
@@ -822,6 +878,8 @@ async function start() {
       silentGain.gain.value = 0; // keep the graph "live" without echoing mic audio to speakers
 
       processorNode.port.onmessage = (event) => {
+        // 助手播放 / 回声冷却期间不上传麦克风，从源头避免服务端 VAD 把外放当作用户说话
+        if (isEchoGuardActive()) return;
         const downsampled = downsampleTo16k(event.data, captureCtx.sampleRate);
         const pcm16 = floatTo16BitPCM(downsampled);
         sendEvent({ type: "input_audio_buffer.append", audio: int16ToBase64(pcm16) });
