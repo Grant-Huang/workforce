@@ -120,7 +120,7 @@ def compatible_mode_base():
     return "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
-ASSET_VERSION = os.environ.get("ASSET_VERSION", "20260915d")
+ASSET_VERSION = os.environ.get("ASSET_VERSION", "20260915e")
 
 
 async def index(request):
